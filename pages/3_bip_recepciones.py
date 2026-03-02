@@ -81,6 +81,9 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 st.title("Analisis de Recepciones BIP")
 
+from metodologia import render_download as _render_metodologia
+_render_metodologia("bip_recepciones")
+
 # ---------------------------------------------------------------------------
 # Procesamiento
 # ---------------------------------------------------------------------------
