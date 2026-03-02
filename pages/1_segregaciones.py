@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import json
 from io import BytesIO
+from pathlib import Path
 from datetime import date
 from xlsxwriter.utility import xl_col_to_name
 
@@ -19,6 +21,25 @@ def find_col(columns, candidates):
             if cand_lower in k or k in cand_lower:
                 return v
     return None
+
+
+# =============================================================================
+# AUDIT HISTORY — persistent JSON storage
+# =============================================================================
+HISTORY_FILE = Path(__file__).resolve().parent.parent / "data" / "audit_history.json"
+
+
+def load_history():
+    if HISTORY_FILE.exists():
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def save_history(entries):
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(entries, f, ensure_ascii=False, indent=2)
 
 
 # =============================================================================
@@ -259,7 +280,11 @@ with st.expander("Vista previa de datos"):
 # 8. PARAMETERS
 # =============================================================================
 st.header("Configuración por segregación")
-seed = st.sidebar.number_input("Semilla aleatoria", value=42, min_value=0, step=1, key="seg_seed")
+usar_semilla = st.sidebar.checkbox("Usar semilla fija (reproducibilidad)", value=False, key="seg_usar_semilla")
+if usar_semilla:
+    seed = st.sidebar.number_input("Semilla aleatoria", value=42, min_value=0, step=1, key="seg_seed")
+else:
+    seed = None
 
 # Defaults
 n_ubic_alea = 10; min_lin_alea = 4
@@ -285,10 +310,46 @@ for i, tipo in enumerate(tipos_seg):
 
 
 # =============================================================================
-# 9. GENERATE
+# 9. HISTORY OPTION — no repetir ubicaciones
+# =============================================================================
+no_repetir = st.checkbox(
+    "No repetir ubicaciones del inventario pasado",
+    value=False,
+    key="no_repetir",
+    help="Excluye ubicaciones ya auditadas en Material Valioso y Control Diferenciado, "
+         "para ir rotando y 'peinar' todo el almacén.",
+)
+
+hist_prev_val = set()
+hist_prev_ctrl = set()
+
+if no_repetir:
+    hist = load_history()
+    if hist:
+        for entry in hist:
+            hist_prev_val.update(entry.get("valioso_ubicaciones", []))
+            hist_prev_ctrl.update(entry.get("control_ubicaciones", []))
+        with st.expander(f"Historial: {len(hist)} auditoría(s) anterior(es)"):
+            for entry in hist:
+                n_v = len(entry.get("valioso_ubicaciones", []))
+                n_c = len(entry.get("control_ubicaciones", []))
+                st.markdown(f"- **{entry['fecha']}** — Valioso: {n_v} ubic., Control: {n_c} ubic.")
+            if st.button("Limpiar historial", type="secondary"):
+                save_history([])
+                st.rerun()
+        st.info(
+            f"Se excluirán **{len(hist_prev_val)}** ubic. de Valioso y "
+            f"**{len(hist_prev_ctrl)}** ubic. de Control Diferenciado"
+        )
+    else:
+        st.info("No hay historial previo. Genera y guarda para empezar a rotar ubicaciones.")
+
+
+# =============================================================================
+# 10. GENERATE
 # =============================================================================
 if st.button("Generar Segregaciones", type="primary", use_container_width=True):
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(seed)  # seed=None → truly random each click
 
     def get_eligible(df, min_lines, filter_col=None):
         if filter_col:
@@ -306,6 +367,7 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
 
     used = set()
     valor_total_almacen = merged["Valor_Total"].sum()
+    _gen_warnings = []
 
     top_val = []
     samp_ctrl = []
@@ -315,30 +377,62 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
     if "Material Valioso" in tipos_seg:
         elig_v = get_eligible(merged, min_lin_val)
         vbl = merged[merged[COL_UBIC].isin(elig_v)].groupby(COL_UBIC)["Valor_Total"].sum().sort_values(ascending=False)
-        cs = vbl.cumsum()
-        tgt = valor_total_almacen * (pct_valor / 100.0)
-        top_val = cs[cs <= tgt].index.tolist()
-        if len(top_val) < len(vbl):
-            rem = [l for l in vbl.index if l not in top_val]
-            if rem:
-                top_val.append(rem[0])
-        if len(top_val) > max_ubic_val:
-            cap = vbl.head(max_ubic_val).index.tolist()
-            cap_v = vbl.loc[cap].sum()
-            pr = cap_v / valor_total_almacen * 100 if valor_total_almacen > 0 else 0
-            st.error(f"Se necesitan **{len(top_val)}** ubicaciones para el {pct_valor}%. Con {max_ubic_val} se cubre el **{pr:.1f}%**.")
-            st.stop()
+
+        # Exclude previously audited locations
+        if no_repetir and hist_prev_val:
+            excl_mask = vbl.index.isin(hist_prev_val)
+            n_excl = excl_mask.sum()
+            if n_excl > 0:
+                vbl = vbl[~excl_mask]
+                _gen_warnings.append(f"Valioso: {n_excl} ubicaciones excluidas por historial")
+            if vbl.empty:
+                _gen_warnings.append(
+                    "Todas las ubicaciones de Valioso ya fueron auditadas. "
+                    "Considera limpiar el historial para reiniciar el ciclo."
+                )
+
+        if not vbl.empty:
+            cs = vbl.cumsum()
+            tgt = valor_total_almacen * (pct_valor / 100.0)
+            top_val = cs[cs <= tgt].index.tolist()
+            if len(top_val) < len(vbl):
+                rem = [loc for loc in vbl.index if loc not in top_val]
+                if rem:
+                    top_val.append(rem[0])
+            if len(top_val) > max_ubic_val:
+                cap = vbl.head(max_ubic_val).index.tolist()
+                cap_v = vbl.loc[cap].sum()
+                pr = cap_v / valor_total_almacen * 100 if valor_total_almacen > 0 else 0
+                st.error(
+                    f"Se necesitan **{len(top_val)}** ubicaciones para el {pct_valor}%. "
+                    f"Con {max_ubic_val} se cubre el **{pr:.1f}%**."
+                )
+                st.stop()
         used.update(top_val)
 
     # 2) CONTROL DIFERENCIADO
     if "Control Diferenciado" in tipos_seg:
-        elig_c = [l for l in get_eligible(merged, min_lin_ctrl, "_es_control") if l not in used]
+        elig_c = [loc for loc in get_eligible(merged, min_lin_ctrl, "_es_control") if loc not in used]
+
+        # Exclude previously audited locations
+        if no_repetir and hist_prev_ctrl:
+            before = len(elig_c)
+            elig_c = [loc for loc in elig_c if loc not in hist_prev_ctrl]
+            n_excl = before - len(elig_c)
+            if n_excl > 0:
+                _gen_warnings.append(f"Control: {n_excl} ubicaciones excluidas por historial")
+            if not elig_c:
+                _gen_warnings.append(
+                    "Todas las ubicaciones de Control Diferenciado ya fueron auditadas. "
+                    "Considera limpiar el historial para reiniciar el ciclo."
+                )
+
         samp_ctrl = sample_locs(elig_c, n_ubic_ctrl)
         used.update(samp_ctrl)
 
     # 3) ALEATORIO
     if "Aleatorio" in tipos_seg:
-        elig_g = [l for l in get_eligible(merged, min_lin_alea) if l not in used]
+        elig_g = [loc for loc in get_eligible(merged, min_lin_alea) if loc not in used]
         samp_alea = sample_locs(elig_g, n_ubic_alea)
         used.update(samp_alea)
 
@@ -385,45 +479,79 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
         seg_val = merged[merged[COL_UBIC].isin(top_val)].copy()
         seg_val_fmt = build_audit_df(seg_val, include_value=True)
 
-    # === DISPLAY ===
+    # Store results in session_state so they persist across reruns
+    SS["seg_results"] = {
+        "samp_alea": samp_alea,
+        "samp_ctrl": samp_ctrl,
+        "top_val": top_val,
+        "seg_alea_fmt": seg_alea_fmt,
+        "seg_ctrl_fmt": seg_ctrl_fmt,
+        "seg_val_fmt": seg_val_fmt,
+        "n_used": len(used),
+        "valor_total_almacen": valor_total_almacen,
+        "tipos_seg": list(tipos_seg),
+        "warnings": _gen_warnings,
+        "saved_to_history": False,
+    }
+
+
+# =============================================================================
+# 11. DISPLAY RESULTS (from session_state, persists across reruns)
+# =============================================================================
+if "seg_results" in SS:
+    res = SS["seg_results"]
+    samp_alea = res["samp_alea"]
+    samp_ctrl = res["samp_ctrl"]
+    top_val = res["top_val"]
+    seg_alea_fmt = res["seg_alea_fmt"]
+    seg_ctrl_fmt = res["seg_ctrl_fmt"]
+    seg_val_fmt = res["seg_val_fmt"]
+    res_tipos = res["tipos_seg"]
+    valor_total_almacen_r = res["valor_total_almacen"]
+
+    # Show generation warnings
+    for w in res.get("warnings", []):
+        st.warning(w)
+
     st.header("Resultados")
-    st.markdown(f"**{len(used)} ubicaciones** en total (sin repeticiones)")
+    st.markdown(f"**{res['n_used']} ubicaciones** en total (sin repeticiones)")
 
     tab_labels = []
     tab_items = []
 
-    if "Aleatorio" in tipos_seg:
+    if "Aleatorio" in res_tipos:
         tab_labels.append(f"Aleatorio ({len(samp_alea)})")
         tab_items.append(("alea", samp_alea, seg_alea_fmt, None))
-    if "Control Diferenciado" in tipos_seg:
+    if "Control Diferenciado" in res_tipos:
         tab_labels.append(f"Control Diferenciado ({len(samp_ctrl)})")
         seg_ctrl_raw = merged[merged[COL_UBIC].isin(samp_ctrl)] if samp_ctrl else pd.DataFrame()
         tab_items.append(("ctrl", samp_ctrl, seg_ctrl_fmt, seg_ctrl_raw))
-    if "Material Valioso" in tipos_seg:
+    if "Material Valioso" in res_tipos:
         tab_labels.append(f"Material Valioso ({len(top_val)})")
         seg_val_raw = merged[merged[COL_UBIC].isin(top_val)] if top_val else pd.DataFrame()
         tab_items.append(("val", top_val, seg_val_fmt, seg_val_raw))
 
-    tabs = st.tabs(tab_labels)
-    for tab, (kind, locs, fmt_df, raw_df) in zip(tabs, tab_items):
-        with tab:
-            if kind == "alea":
-                st.markdown(f"**{len(locs)}** ubic. · **{len(fmt_df):,}** líneas")
-            elif kind == "ctrl":
-                nc = raw_df["_es_control"].sum() if raw_df is not None and not raw_df.empty else 0
-                st.markdown(f"**{len(locs)}** ubic. · **{len(fmt_df):,}** líneas · Control: **{nc:,}**")
-                st.caption("Columnas operarios: **Cant. Física**, **Fallo en el proceso**, **Obs. Inventario**, **Obs. Proceso**")
-            elif kind == "val":
-                val_cubierto = raw_df["Valor_Total"].sum() if raw_df is not None and not raw_df.empty else 0
-                pct_cub = (val_cubierto / valor_total_almacen * 100) if valor_total_almacen > 0 else 0
-                st.markdown(f"**{len(locs)}** ubic. · **{len(fmt_df):,}** líneas · Valor: **{val_cubierto:,.2f}** ({pct_cub:.1f}%)")
+    if tab_labels:
+        tabs = st.tabs(tab_labels)
+        for tab, (kind, locs, fmt_df, raw_df) in zip(tabs, tab_items):
+            with tab:
+                if kind == "alea":
+                    st.markdown(f"**{len(locs)}** ubic. · **{len(fmt_df):,}** líneas")
+                elif kind == "ctrl":
+                    nc = raw_df["_es_control"].sum() if raw_df is not None and not raw_df.empty else 0
+                    st.markdown(f"**{len(locs)}** ubic. · **{len(fmt_df):,}** líneas · Control: **{nc:,}**")
+                    st.caption("Columnas operarios: **Cant. Física**, **Fallo en el proceso**, **Obs. Inventario**, **Obs. Proceso**")
+                elif kind == "val":
+                    val_cubierto = raw_df["Valor_Total"].sum() if raw_df is not None and not raw_df.empty else 0
+                    pct_cub = (val_cubierto / valor_total_almacen_r * 100) if valor_total_almacen_r > 0 else 0
+                    st.markdown(f"**{len(locs)}** ubic. · **{len(fmt_df):,}** líneas · Valor: **{val_cubierto:,.2f}** ({pct_cub:.1f}%)")
 
-            if not fmt_df.empty:
-                st.dataframe(fmt_df, use_container_width=True, height=500)
-            else:
-                st.warning("Sin datos")
+                if not fmt_df.empty:
+                    st.dataframe(fmt_df, use_container_width=True, height=500)
+                else:
+                    st.warning("Sin datos")
 
-    # === DOWNLOAD ===
+    # === DOWNLOAD & SAVE HISTORY ===
     st.header("Descargar")
 
     def to_formatted_excel(sheets, edit_map):
@@ -488,11 +616,11 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
     }
 
     combined = {}
-    if "Control Diferenciado" in tipos_seg and not seg_ctrl_fmt.empty:
+    if "Control Diferenciado" in res_tipos and not seg_ctrl_fmt.empty:
         combined["material  control diferenc"] = seg_ctrl_fmt
-    if "Material Valioso" in tipos_seg and not seg_val_fmt.empty:
+    if "Material Valioso" in res_tipos and not seg_val_fmt.empty:
         combined["material Valioso"] = seg_val_fmt
-    if "Aleatorio" in tipos_seg and not seg_alea_fmt.empty:
+    if "Aleatorio" in res_tipos and not seg_alea_fmt.empty:
         combined["material aleatorio"] = seg_alea_fmt
 
     if combined:
@@ -503,3 +631,24 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True, type="primary",
         )
+
+    # === SAVE TO HISTORY ===
+    if not res.get("saved_to_history", False):
+        st.divider()
+        st.markdown(
+            "**Guardar en historial** — Para que la próxima auditoría excluya "
+            "estas ubicaciones al marcar *'No repetir'*."
+        )
+        if st.button("Guardar este inventario en el historial", type="secondary", use_container_width=True):
+            hist = load_history()
+            hist.append({
+                "fecha": date.today().isoformat(),
+                "valioso_ubicaciones": [str(u) for u in top_val],
+                "control_ubicaciones": [str(u) for u in samp_ctrl],
+                "aleatorio_ubicaciones": [str(u) for u in samp_alea],
+            })
+            save_history(hist)
+            SS["seg_results"]["saved_to_history"] = True
+            st.rerun()
+    else:
+        st.success("Inventario guardado en el historial.")
