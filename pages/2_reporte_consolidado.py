@@ -7,6 +7,9 @@ from datetime import date
 st.title("Generar Reporte Consolidado")
 st.markdown("Sube el Excel rellenado por los operarios y genera el reporte de KPIs.")
 
+from metodologia import render_download as _render_metodologia
+_render_metodologia("reporte_consolidado")
+
 
 def find_col(columns, candidates):
     cols_lower = {str(c).lower().strip(): c for c in columns}

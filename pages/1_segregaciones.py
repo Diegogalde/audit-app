@@ -10,6 +10,9 @@ from xlsxwriter.utility import xl_col_to_name
 st.title("Generar Segregaciones")
 st.markdown("Genera muestras de auditoría a partir del extracto de stock.")
 
+from metodologia import render_download as _render_metodologia
+_render_metodologia("segregaciones")
+
 
 def find_col(columns, candidates):
     cols_lower = {str(c).lower().strip(): c for c in columns}

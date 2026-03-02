@@ -13,6 +13,9 @@ pages = {
     "Análisis de Recepciones": [
         st.Page("pages/3_bip_recepciones.py", title="BIP Recepciones"),
     ],
+    "Análisis de Absentismo": [
+        st.Page("pages/4_absentismo.py", title="Absentismo por Centro"),
+    ],
 }
 
 pg = st.navigation(pages)
