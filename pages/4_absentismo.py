@@ -782,10 +782,11 @@ def parse_report_excel(data_bytes):
 
 
 # =============================================================================
-# 7. SIDEBAR — FILES + CALENDAR
+# 7. SIDEBAR — FILES + CONFIG (organized in collapsible sections)
 # =============================================================================
-st.sidebar.header("Archivos — Absentismo")
+st.sidebar.header("Absentismo")
 
+# ── 1. SUBIDA DE CUADRANTES (siempre visible — es lo principal) ──
 uploaded_files = st.sidebar.file_uploader(
     "Cuadrantes mensuales (uno por centro)",
     type=["xlsx", "xls"],
@@ -797,157 +798,168 @@ if uploaded_files:
     SS["abs_file_data"] = [(f.name, f.getvalue()) for f in uploaded_files]
     st.sidebar.success(f"{len(uploaded_files)} fichero(s) cargado(s)")
 
-# --- Blank cuadrante template ---
-st.sidebar.divider()
-st.sidebar.subheader("Plantilla cuadrante en blanco")
-st.sidebar.caption("Descarga una plantilla vacía del mes para cumplimentar con los datos de cualquier cliente.")
-_tc1, _tc2 = st.sidebar.columns(2)
-tmpl_month = _tc1.selectbox("Mes", range(1, 13), format_func=lambda m: MONTH_NAMES[m], index=date.today().month - 1, key="tmpl_cuad_month")
-tmpl_year = _tc2.number_input("Año", 2020, 2030, date.today().year, key="tmpl_cuad_year")
-st.sidebar.download_button(
-    "Descargar cuadrante en blanco",
-    generate_cuadrante_template(tmpl_year, tmpl_month),
-    file_name=f"cuadrante_{MONTH_NAMES[tmpl_month].lower()}_{tmpl_year}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
-)
+# ── 2. PLANTILLA CUADRANTE EN BLANCO ──
+with st.sidebar.expander("Plantilla cuadrante en blanco"):
+    st.caption("Descarga una plantilla vacía del mes para cumplimentar.")
+    _tc1, _tc2 = st.columns(2)
+    tmpl_month = _tc1.selectbox("Mes", range(1, 13), format_func=lambda m: MONTH_NAMES[m], index=date.today().month - 1, key="tmpl_cuad_month")
+    tmpl_year = _tc2.number_input("Año", 2020, 2030, date.today().year, key="tmpl_cuad_year")
+    st.download_button(
+        "Descargar cuadrante en blanco",
+        generate_cuadrante_template(tmpl_year, tmpl_month),
+        file_name=f"cuadrante_{MONTH_NAMES[tmpl_month].lower()}_{tmpl_year}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
-# --- Custom calendar ---
-st.sidebar.divider()
-st.sidebar.subheader("Calendario laboral")
-
+# ── 3. CALENDARIO LABORAL + CENTROS DE TRABAJO ──
 custom_cal = load_custom_calendar()
 center_cals = load_center_calendars()
+
+_cal_status = ""
 if custom_cal:
-    st.sidebar.success("Calendario por defecto cargado")
+    _cal_status += "Default "
 if center_cals:
-    st.sidebar.info(f"Calendarios por centro: {', '.join(sorted(center_cals.keys()))}")
+    _cal_status += f"+ {len(center_cals)} centro(s)"
+_cal_label = f"Calendario laboral ({_cal_status.strip()})" if _cal_status.strip() else "Calendario laboral"
 
-cal_year_tmpl = st.sidebar.number_input("Año plantilla", 2020, 2030, date.today().year, key="cal_year_tmpl")
-st.sidebar.download_button(
-    "Descargar plantilla calendario",
-    generate_calendar_template(cal_year_tmpl),
-    file_name=f"calendario_laboral_{cal_year_tmpl}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
-)
+with st.sidebar.expander(_cal_label):
+    if custom_cal:
+        st.success("Calendario por defecto cargado")
+    if center_cals:
+        st.info(f"Calendarios por centro: {', '.join(sorted(center_cals.keys()))}")
 
-_cal_mode = st.sidebar.radio(
-    "Subir calendario para:",
-    ["Por defecto (todos los centros)", "Centro específico"],
-    key="cal_upload_mode",
-    horizontal=True,
-)
-
-if _cal_mode == "Centro específico":
-    centros_registrados = load_centros_trabajo()
-    _cal_centro_opts = centros_registrados if centros_registrados else []
-    _cal_centro_name = st.sidebar.text_input(
-        "Nombre del centro",
-        placeholder="Ej: Almacén Pamplona",
-        key="cal_centro_name",
-        help="Debe coincidir con el nombre del fichero del cuadrante (sin extensión)." + (
-            f" Centros registrados: {', '.join(_cal_centro_opts)}" if _cal_centro_opts else ""
-        ),
+    # Download template
+    cal_year_tmpl = st.number_input("Año plantilla", 2020, 2030, date.today().year, key="cal_year_tmpl")
+    st.download_button(
+        "Descargar plantilla calendario",
+        generate_calendar_template(cal_year_tmpl),
+        file_name=f"calendario_laboral_{cal_year_tmpl}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
     )
-    cal_upload = st.sidebar.file_uploader("Subir calendario del centro", type=["xlsx", "xls"], key="cal_up_centro")
-    if cal_upload and _cal_centro_name.strip():
-        parsed_cal = parse_calendar_upload(cal_upload.getvalue())
-        if parsed_cal:
-            save_center_calendar(_cal_centro_name.strip(), parsed_cal)
-            center_cals = load_center_calendars()
-            st.sidebar.success(f"Calendario de **{_cal_centro_name.strip()}** guardado")
-        else:
-            st.sidebar.error("No se pudo leer el calendario")
-    elif cal_upload and not _cal_centro_name.strip():
-        st.sidebar.warning("Indica el nombre del centro antes de subir el calendario")
-else:
-    cal_upload = st.sidebar.file_uploader("Subir calendario cumplimentado", type=["xlsx", "xls"], key="cal_up")
-    if cal_upload:
-        parsed_cal = parse_calendar_upload(cal_upload.getvalue())
-        if parsed_cal:
-            save_custom_calendar(parsed_cal)
-            custom_cal = parsed_cal
-            st.sidebar.success("Calendario por defecto guardado")
-        else:
-            st.sidebar.error("No se pudo leer el calendario")
 
-# Delete calendars
-if custom_cal or center_cals:
-    with st.sidebar.expander("Gestionar calendarios"):
+    st.divider()
+
+    _cal_mode = st.radio(
+        "Subir calendario para:",
+        ["Por defecto (todos)", "Centro específico"],
+        key="cal_upload_mode",
+        horizontal=True,
+    )
+
+    if _cal_mode == "Centro específico":
+        centros_registrados = load_centros_trabajo()
+        _cal_centro_opts = centros_registrados if centros_registrados else []
+        _cal_centro_name = st.text_input(
+            "Nombre del centro",
+            placeholder="Ej: Almacén Pamplona",
+            key="cal_centro_name",
+            help="Debe coincidir con el nombre del fichero del cuadrante (sin extensión)." + (
+                f" Centros registrados: {', '.join(_cal_centro_opts)}" if _cal_centro_opts else ""
+            ),
+        )
+        cal_upload = st.file_uploader("Subir calendario del centro", type=["xlsx", "xls"], key="cal_up_centro")
+        if cal_upload and _cal_centro_name.strip():
+            parsed_cal = parse_calendar_upload(cal_upload.getvalue())
+            if parsed_cal:
+                save_center_calendar(_cal_centro_name.strip(), parsed_cal)
+                center_cals = load_center_calendars()
+                st.success(f"Calendario de **{_cal_centro_name.strip()}** guardado")
+            else:
+                st.error("No se pudo leer el calendario")
+        elif cal_upload and not _cal_centro_name.strip():
+            st.warning("Indica el nombre del centro antes de subir")
+    else:
+        cal_upload = st.file_uploader("Subir calendario cumplimentado", type=["xlsx", "xls"], key="cal_up")
+        if cal_upload:
+            parsed_cal = parse_calendar_upload(cal_upload.getvalue())
+            if parsed_cal:
+                save_custom_calendar(parsed_cal)
+                custom_cal = parsed_cal
+                st.success("Calendario por defecto guardado")
+            else:
+                st.error("No se pudo leer el calendario")
+
+    # Delete calendars
+    if custom_cal or center_cals:
+        st.divider()
+        st.caption("**Eliminar calendarios**")
         if custom_cal:
-            if st.button("Borrar calendario por defecto", key="del_cal_default", type="secondary"):
+            if st.button("Borrar calendario por defecto", key="del_cal_default", type="secondary", use_container_width=True):
                 raw = _load_raw_calendar()
                 raw["__default__"] = None
                 with open(CALENDAR_FILE, "w", encoding="utf-8") as f:
                     json.dump(raw, f, ensure_ascii=False, indent=2)
                 st.rerun()
         for cname in sorted(center_cals.keys()):
-            if st.button(f"Borrar calendario: {cname}", key=f"del_cal_{cname}", type="secondary"):
+            if st.button(f"Borrar: {cname}", key=f"del_cal_{cname}", type="secondary", use_container_width=True):
                 delete_center_calendar(cname)
                 st.rerun()
 
-# --- Centros de trabajo ---
-st.sidebar.divider()
-st.sidebar.subheader("Centros de trabajo")
-st.sidebar.caption("Registra los centros para facilitar la asignación de calendarios.")
+# ── 4. CENTROS DE TRABAJO ──
 centros_registrados = load_centros_trabajo()
-if centros_registrados:
-    st.sidebar.success(f"{len(centros_registrados)} centro(s): {', '.join(centros_registrados)}")
-_nuevo_centro = st.sidebar.text_input("Añadir centro", placeholder="Ej: Almacén Pamplona", key="nuevo_centro_input")
-if st.sidebar.button("Registrar centro", key="btn_add_centro"):
-    if _nuevo_centro.strip():
-        centros_registrados = load_centros_trabajo()
-        if _nuevo_centro.strip() not in centros_registrados:
-            centros_registrados.append(_nuevo_centro.strip())
-            save_centros_trabajo(centros_registrados)
-            st.rerun()
-        else:
-            st.sidebar.warning("El centro ya existe")
-    else:
-        st.sidebar.warning("Escribe un nombre de centro")
-if centros_registrados:
-    with st.sidebar.expander("Eliminar centros"):
+_centros_label = f"Centros de trabajo ({len(centros_registrados)})" if centros_registrados else "Centros de trabajo"
+with st.sidebar.expander(_centros_label):
+    st.caption("Registra los centros para facilitar la asignación de calendarios.")
+    if centros_registrados:
         for cn in centros_registrados:
-            if st.button(f"Eliminar: {cn}", key=f"del_centro_{cn}", type="secondary"):
+            _cc1, _cc2 = st.columns([3, 1])
+            _cc1.markdown(f"**{cn}**")
+            if _cc2.button("X", key=f"del_centro_{cn}", type="secondary"):
                 centros_registrados = [c for c in centros_registrados if c != cn]
                 save_centros_trabajo(centros_registrados)
                 st.rerun()
+    _nuevo_centro = st.text_input("Nuevo centro", placeholder="Ej: Almacén Pamplona", key="nuevo_centro_input", label_visibility="collapsed")
+    if st.button("Registrar centro", key="btn_add_centro", use_container_width=True):
+        if _nuevo_centro.strip():
+            centros_registrados = load_centros_trabajo()
+            if _nuevo_centro.strip() not in centros_registrados:
+                centros_registrados.append(_nuevo_centro.strip())
+                save_centros_trabajo(centros_registrados)
+                st.rerun()
+            else:
+                st.warning("El centro ya existe")
+        else:
+            st.warning("Escribe un nombre de centro")
 
-# --- Employee list (optional override) ---
-st.sidebar.divider()
-st.sidebar.subheader("Plantilla de empleados")
-st.sidebar.caption("Opcional: sube una lista con los empleados reales de cada centro para evitar que se cuenten filas de resumen o títulos.")
-
+# ── 5. PLANTILLA DE EMPLEADOS ──
 employee_override = load_employee_list()
+_emp_label = "Plantilla de empleados"
 if employee_override:
     total_emp = sum(len(v) for v in employee_override.values())
-    st.sidebar.success(f"Lista cargada: {total_emp} empleados en {len(employee_override)} centro(s)")
+    _emp_label += f" ({total_emp} emp.)"
 
-st.sidebar.download_button(
-    "Descargar plantilla empleados",
-    generate_employee_template(),
-    file_name="plantilla_empleados.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
-)
+with st.sidebar.expander(_emp_label):
+    st.caption("Opcional: sube una lista con los empleados reales de cada centro para evitar que se cuenten filas de resumen o títulos.")
+    if employee_override:
+        st.success(f"{total_emp} empleados en {len(employee_override)} centro(s)")
 
-emp_upload = st.sidebar.file_uploader("Subir plantilla cumplimentada", type=["xlsx", "xls"], key="emp_up")
-if emp_upload:
-    parsed_emp = parse_employee_upload(emp_upload.getvalue())
-    if parsed_emp:
-        save_employee_list(parsed_emp)
-        employee_override = parsed_emp
-        total_emp = sum(len(v) for v in parsed_emp.values())
-        st.sidebar.success(f"Guardado: {total_emp} empleados en {len(parsed_emp)} centro(s)")
-    else:
-        st.sidebar.error("No se pudo leer la plantilla. Verifica que tenga columnas Centro y Empleado.")
+    st.download_button(
+        "Descargar plantilla empleados",
+        generate_employee_template(),
+        file_name="plantilla_empleados.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
-if employee_override and st.sidebar.button("Borrar lista de empleados", type="secondary"):
-    if EMPLOYEES_FILE.exists():
-        EMPLOYEES_FILE.unlink()
-    employee_override = None
-    st.rerun()
+    emp_upload = st.file_uploader("Subir plantilla cumplimentada", type=["xlsx", "xls"], key="emp_up")
+    if emp_upload:
+        parsed_emp = parse_employee_upload(emp_upload.getvalue())
+        if parsed_emp:
+            save_employee_list(parsed_emp)
+            employee_override = parsed_emp
+            total_emp = sum(len(v) for v in parsed_emp.values())
+            st.success(f"Guardado: {total_emp} empleados en {len(parsed_emp)} centro(s)")
+        else:
+            st.error("No se pudo leer la plantilla. Verifica que tenga columnas Centro y Empleado.")
+
+    if employee_override:
+        if st.button("Borrar lista de empleados", type="secondary", use_container_width=True):
+            if EMPLOYEES_FILE.exists():
+                EMPLOYEES_FILE.unlink()
+            employee_override = None
+            st.rerun()
 
 # --- Guard ---
 if "abs_file_data" not in SS or not SS["abs_file_data"]:
@@ -1125,12 +1137,64 @@ if "abs_results" in SS:
                     merge_dups[name] = [(c, e) for c, e in entries if c in selected_to_merge]
 
             if merge_dups:
-                dup_names = ", ".join(e[0][1]["nombre"] for e in merge_dups.values())
-                st.info(f"Se eliminarán **{len(merge_dups)} repetido(s)**: {dup_names}")
+                # === VALIDATE: compare day distributions ===
+                _COMPARE_KEYS = ["worked", "V", "B", "AP", "P", "PR", "E"]
+                _COMPARE_LABELS = ["Trabajados", "Vacaciones", "Bajas", "A.Propios", "Permiso", "P.Retrib.", "Excedencia"]
+                matching = {}   # name → True if all centers match
+                mismatch_details = []  # rows for mismatch table
+
+                for norm_name, entries in merge_dups.items():
+                    display_name = entries[0][1]["nombre"]
+                    first_centro, first_emp = entries[0]
+                    all_match = True
+                    for other_centro, other_emp in entries[1:]:
+                        for k in _COMPARE_KEYS:
+                            if first_emp.get(k, 0) != other_emp.get(k, 0):
+                                all_match = False
+                                break
+                    matching[norm_name] = all_match
+
+                    if not all_match:
+                        for centro, emp in entries:
+                            mismatch_details.append({
+                                "Empleado": display_name,
+                                "Centro": centro,
+                                **{lab: emp.get(k, 0) for k, lab in zip(_COMPARE_KEYS, _COMPARE_LABELS)},
+                            })
+
+                n_ok = sum(1 for v in matching.values() if v)
+                n_bad = sum(1 for v in matching.values() if not v)
+
+                if n_bad > 0:
+                    st.error(
+                        f"**{n_bad} empleado(s) con distribución de días DIFERENTE** entre centros. "
+                        f"Revisa antes de fusionar — al fusionar se mantiene solo un registro y se pierde el otro."
+                    )
+                    df_mismatch = pd.DataFrame(mismatch_details)
+                    st.dataframe(df_mismatch, use_container_width=True, hide_index=True)
+
+                    # Show which are OK
+                    if n_ok > 0:
+                        ok_names = [merge_dups[n][0][1]["nombre"] for n, v in matching.items() if v]
+                        st.success(f"**{n_ok} empleado(s) coinciden** perfectamente: {', '.join(ok_names)}")
+
+                    st.warning("Puedes fusionar de todos modos, pero los registros que no coincidan perderán datos del centro descartado.")
+                    _allow_merge = st.checkbox(
+                        "Entiendo el riesgo, fusionar igualmente",
+                        key="force_merge_mismatch",
+                    )
+                else:
+                    ok_names = [merge_dups[n][0][1]["nombre"] for n in merge_dups]
+                    st.success(
+                        f"**{n_ok} empleado(s) coinciden** perfectamente entre centros: {', '.join(ok_names)}. "
+                        f"Fusión segura."
+                    )
+                    _allow_merge = True
             else:
                 st.info("No hay empleados repetidos entre los centros seleccionados.")
+                _allow_merge = True
 
-            if st.button("Fusionar seleccionados", type="primary", use_container_width=True):
+            if _allow_merge and st.button("Fusionar seleccionados", type="primary", use_container_width=True):
                 merged_name = " + ".join(selected_to_merge)
                 merge_emp_details = {c: all_employees[c] for c in selected_to_merge if c in all_employees}
                 merged_employees = merge_employee_records(merge_emp_details)
