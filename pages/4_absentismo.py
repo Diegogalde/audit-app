@@ -1010,10 +1010,17 @@ if "abs_results" in SS:
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             wb = writer.book
-            title_f = wb.add_format({"bold": True, "font_size": 14, "font_color": "#1F3864", "bottom": 2})
+            title_f = wb.add_format({"bold": True, "font_size": 14, "bg_color": "#1F3864", "font_color": "white", "align": "center", "valign": "vcenter"})
             hdr_f = wb.add_format({"bold": True, "font_size": 10, "bg_color": "#1F3864", "font_color": "white", "border": 1, "text_wrap": True, "valign": "vcenter", "align": "center"})
             lbl_f = wb.add_format({"bold": True, "font_size": 10, "border": 1, "bg_color": "#D6DCE4"})
             num_f = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0"})
+            # Yellow highlight for plantilla efectiva
+            lbl_yellow = wb.add_format({"bold": True, "font_size": 10, "border": 1, "bg_color": "#FFD966", "font_color": "#1F3864"})
+            num_yellow = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0.0", "bg_color": "#FFF2CC"})
+            # Red highlight for total ausencias
+            lbl_red = wb.add_format({"bold": True, "font_size": 10, "border": 1, "bg_color": "#FFC7CE", "font_color": "#9C0006"})
+            num_red = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0", "bg_color": "#FFC7CE", "font_color": "#9C0006"})
+            # Percentage formats
             pct_f = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "0.00%"})
             pct_green = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "0.00%", "font_color": "#006100", "bg_color": "#C6EFCE"})
             pct_red = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "0.00%", "font_color": "#9C0006", "bg_color": "#FFC7CE"})
@@ -1031,8 +1038,10 @@ if "abs_results" in SS:
                 ws.set_column(ci, ci, 18)
 
             row = 0
-            ws.merge_range(row, 0, row, len(kpis_list) + 1,
-                           f"ANÁLISIS DE ABSENTISMO — {MONTH_NAMES[r_month]} {r_year}", title_f)
+            ncols = len(kpis_list) + (1 if len(kpis_list) > 1 else 0)
+            ws.merge_range(row, 0, row, ncols,
+                           f"ANÁLISIS DE ABSENTISMO — {MONTH_NAMES[r_month].upper()} {r_year}", title_f)
+            ws.set_row(row, 30)
             row += 2
 
             headers = [""] + [k["centro"] for k in kpis_list]
@@ -1043,26 +1052,33 @@ if "abs_results" in SS:
             ws.set_row(row, 25)
             row += 1
 
+            # Metrics with per-row formatting
             metrics = [
-                ("Plantilla", "plantilla"),
-                ("Plantilla efectiva", "plantilla_efectiva"),
-                ("Días laborables", "dias_laborables"),
-                ("Días trabajados", "dias_trabajados"),
-                ("Vacaciones (días)", "dias_vacaciones"),
-                ("Bajas (días)", "dias_baja"),
-                ("Asuntos Propios (días)", "dias_ap"),
-                ("Permisos (días)", "dias_permiso"),
-                ("Excedencias (días)", "dias_excedencia"),
-                ("Total ausencias (con vac.)", "total_ausencias_con_vac"),
-                ("Total ausencias (sin vac.)", "total_ausencias_sin_vac"),
+                ("Plantilla", "plantilla", lbl_f, num_f),
+                ("Plantilla efectiva", "plantilla_efectiva", lbl_yellow, num_yellow),
+                ("Días laborables", "dias_laborables", lbl_f, num_f),
+                ("Días trabajados", "dias_trabajados", lbl_f, num_f),
+                ("Vacaciones (días)", "dias_vacaciones", lbl_f, num_f),
+                ("Bajas (días)", "dias_baja", lbl_f, num_f),
+                ("Asuntos Propios (días)", "dias_ap", lbl_f, num_f),
+                ("Permisos (días)", "dias_permiso", lbl_f, num_f),
+                ("Excedencias (días)", "dias_excedencia", lbl_f, num_f),
+                ("Total ausencias (con vac.)", "total_ausencias_con_vac", lbl_red, num_red),
+                ("Total ausencias (sin vac.)", "total_ausencias_sin_vac", lbl_red, num_red),
             ]
 
-            for label, key in metrics:
-                ws.write(row, 0, label, lbl_f)
+            for label, key, lfmt, nfmt in metrics:
+                ws.write(row, 0, label, lfmt)
                 for ci, k in enumerate(kpis_list):
-                    ws.write(row, ci + 1, k[key], num_f)
+                    ws.write(row, ci + 1, k[key], nfmt)
                 if len(kpis_list) > 1:
-                    ws.write(row, len(kpis_list) + 1, sum(k[key] for k in kpis_list), num_f)
+                    total_val = sum(k[key] for k in kpis_list)
+                    if key == "plantilla_efectiva":
+                        # Recalculate instead of summing individual values
+                        t_worked = sum(k["dias_trabajados"] for k in kpis_list)
+                        t_wdays = kpis_list[0]["dias_laborables"] if kpis_list else 0
+                        total_val = round(t_worked / t_wdays, 1) if t_wdays > 0 else 0
+                    ws.write(row, len(kpis_list) + 1, total_val, nfmt)
                 row += 1
 
             row += 1
@@ -1084,8 +1100,12 @@ if "abs_results" in SS:
 
             # Legend
             row += 2
-            ws.merge_range(row, 0, row, len(kpis_list) + 1,
+            ws.merge_range(row, 0, row, ncols,
                            "Leyenda: Verde = < 5% absentismo · Sin color = 5%-10% · Rojo = > 10%", legend_f)
+            row += 1
+            ws.merge_range(row, 0, row, ncols,
+                           "Plantilla efectiva = Días trabajados ÷ Días laborables. "
+                           "Indica el nº medio de personas que realmente han trabajado cada día del mes.", legend_f)
 
             ws.print_area(0, 0, row + 1, len(kpis_list) + 1)
             ws.set_landscape()
