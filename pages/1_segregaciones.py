@@ -557,9 +557,132 @@ if "seg_results" in SS:
     # === DOWNLOAD & SAVE HISTORY ===
     st.header("Descargar")
 
+    def _write_instructions_sheet(writer):
+        """Add an Instructions sheet as the first tab in the workbook."""
+        wb = writer.book
+        ws = wb.add_worksheet("Instrucciones")
+
+        # Formats
+        title_f = wb.add_format({"bold": True, "font_size": 16, "font_color": "#1F3864", "bottom": 2, "bottom_color": "#1F3864"})
+        section_f = wb.add_format({"bold": True, "font_size": 12, "font_color": "#1F3864", "bg_color": "#D9E2F3", "border": 1, "text_wrap": True})
+        hdr_blue = wb.add_format({"bold": True, "font_size": 10, "bg_color": "#1F3864", "font_color": "white", "border": 1, "text_wrap": True, "valign": "vcenter"})
+        hdr_yellow = wb.add_format({"bold": True, "font_size": 10, "bg_color": "#FFD966", "font_color": "#1F3864", "border": 1, "text_wrap": True, "valign": "vcenter"})
+        cell_f = wb.add_format({"font_size": 10, "border": 1, "text_wrap": True, "valign": "top"})
+        cell_bold = wb.add_format({"bold": True, "font_size": 10, "border": 1, "text_wrap": True, "valign": "top"})
+        note_f = wb.add_format({"font_size": 10, "italic": True, "text_wrap": True, "font_color": "#666666"})
+
+        ws.set_column(0, 0, 25)
+        ws.set_column(1, 1, 18)
+        ws.set_column(2, 2, 60)
+
+        row = 0
+        ws.merge_range(row, 0, row, 2, "INSTRUCCIONES DE CUMPLIMENTACIÓN — Auditoría de Inventario", title_f)
+        ws.set_row(row, 30)
+        row += 2
+
+        # General notes
+        ws.merge_range(row, 0, row, 2, "INFORMACIÓN GENERAL", section_f)
+        row += 1
+        general = [
+            "Las columnas con cabecera AZUL son datos del sistema (NO modificar).",
+            "Las columnas con cabecera AMARILLA son las que el operario debe cumplimentar.",
+            "La columna 'Descuadre' se calcula automáticamente (Cant. Física − Stock). No escribir en ella.",
+            "Cada pestaña corresponde a un tipo de segregación distinto.",
+        ]
+        for line in general:
+            ws.merge_range(row, 0, row, 2, line, cell_f)
+            row += 1
+        row += 1
+
+        # Column descriptions — shared columns
+        ws.merge_range(row, 0, row, 2, "COLUMNAS COMUNES (TODAS LAS PESTAÑAS)", section_f)
+        row += 1
+        ws.write(row, 0, "Columna", hdr_blue)
+        ws.write(row, 1, "Tipo", hdr_blue)
+        ws.write(row, 2, "Descripción / Cómo cumplimentar", hdr_blue)
+        row += 1
+
+        common_cols = [
+            ("Fecha", "Sistema", "Fecha de generación de la auditoría. No modificar."),
+            ("Ref. centro", "Sistema", "Referencia del centro de coste. No modificar."),
+            ("Ref. Almacén", "Sistema", "Referencia del almacén. No modificar."),
+            ("Ubicacion", "Sistema", "Ubicación física del material en el almacén. No modificar."),
+            ("Ref. Material", "Sistema", "Código de referencia del material. No modificar."),
+            ("Descripción", "Sistema", "Descripción del material. No modificar."),
+            ("Nº Lote", "Sistema", "Número de lote del material. No modificar."),
+            ("Nº Serie", "Sistema", "Número de serie, si aplica. No modificar."),
+            ("Stock", "Sistema", "Cantidad en stock según el sistema (SAP). No modificar."),
+            ("Cant. Física", "OPERARIO", "Contar el material FÍSICAMENTE en la ubicación indicada y anotar la cantidad real encontrada. Si no hay material, poner 0."),
+            ("Descuadre", "Automático", "Se calcula solo: Cant. Física − Stock. NO escribir aquí."),
+            ("Unidad Base", "Sistema", "Unidad de medida (UN, KG, L, etc.). No modificar."),
+            ("Stock OK", "Sistema", "Cantidad de stock en estado libre/disponible. No modificar."),
+            ("Stock Bloqueado", "Sistema", "Cantidad de stock bloqueado (calidad, inspección, etc.). No modificar."),
+            ("Tipo Bloqueo", "Sistema", "Motivo del bloqueo si lo hay. No modificar."),
+        ]
+        for col, tipo, desc in common_cols:
+            fmt = hdr_yellow if tipo == "OPERARIO" else cell_bold
+            ws.write(row, 0, col, fmt)
+            ws.write(row, 1, tipo, cell_f)
+            ws.write(row, 2, desc, cell_f)
+            ws.set_row(row, 30 if tipo == "OPERARIO" else 20)
+            row += 1
+        row += 1
+
+        # Valuable/random extra columns
+        ws.merge_range(row, 0, row, 2, "COLUMNAS ADICIONALES — Material Valioso y Aleatorio", section_f)
+        row += 1
+        val_cols = [
+            ("Valor unitario", "Sistema", "Precio unitario del material según SAP. No modificar."),
+            ("Valor total", "Sistema", "Valor total de la línea (precio × cantidad). No modificar."),
+            ("Observaciones Inventario", "OPERARIO", "Anotar cualquier incidencia: material dañado, ubicación incorrecta, material no encontrado, diferencia de lote, etc."),
+        ]
+        for col, tipo, desc in val_cols:
+            fmt = hdr_yellow if tipo == "OPERARIO" else cell_bold
+            ws.write(row, 0, col, fmt)
+            ws.write(row, 1, tipo, cell_f)
+            ws.write(row, 2, desc, cell_f)
+            ws.set_row(row, 30 if tipo == "OPERARIO" else 20)
+            row += 1
+        row += 1
+
+        # Control diferenciado extra columns
+        ws.merge_range(row, 0, row, 2, "COLUMNAS ADICIONALES — Control Diferenciado", section_f)
+        row += 1
+        ctrl_cols = [
+            ("Fallo en el proceso", "OPERARIO", "Marcar SI o NO. ¿Se ha detectado un fallo en el proceso logístico? (ubicación errónea, material mal almacenado, etiqueta incorrecta, etc.)"),
+            ("Obs. Inventario", "OPERARIO", "Observaciones sobre el conteo: material dañado, no encontrado, diferencia de lote, etc."),
+            ("Obs. Proceso", "OPERARIO", "Describir el fallo de proceso detectado: qué estaba mal, posible causa, acción sugerida."),
+        ]
+        for col, tipo, desc in ctrl_cols:
+            ws.write(row, 0, col, hdr_yellow)
+            ws.write(row, 1, tipo, cell_f)
+            ws.write(row, 2, desc, cell_f)
+            ws.set_row(row, 35)
+            row += 1
+        row += 1
+
+        # Tips
+        ws.merge_range(row, 0, row, 2, "CONSEJOS PARA EL CONTEO", section_f)
+        row += 1
+        tips = [
+            "1. Ir a la ubicación indicada y verificar que el material coincide con la referencia y descripción.",
+            "2. Contar TODO el material en la ubicación (incluyendo bloqueado) y anotarlo en 'Cant. Física'.",
+            "3. Si el material no se encuentra en la ubicación, poner 0 en 'Cant. Física' y anotar en observaciones.",
+            "4. Si hay un lote/serie diferente al indicado, anotarlo en observaciones.",
+            "5. En Control Diferenciado: revisar también si el proceso logístico es correcto (ubicación, almacenaje, etiquetado).",
+        ]
+        for tip in tips:
+            ws.merge_range(row, 0, row, 2, tip, cell_f)
+            ws.set_row(row, 20)
+            row += 1
+
+        ws.set_landscape()
+        ws.fit_to_pages(1, 0)
+
     def to_formatted_excel(sheets, edit_map):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            _write_instructions_sheet(writer)
             for sname, df in sheets.items():
                 safe = sname[:31]
                 df.to_excel(writer, sheet_name=safe, index=False)
