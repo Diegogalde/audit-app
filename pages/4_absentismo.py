@@ -631,6 +631,90 @@ def save_abs_history(entries):
         json.dump(entries, f, ensure_ascii=False, indent=2)
 
 
+# Reverse mapping: month name → number
+_MONTH_NAME_TO_NUM = {v.upper(): k for k, v in MONTH_NAMES.items()}
+
+
+def parse_report_excel(data_bytes):
+    """Parse an exported absentismo Excel report back into a history entry.
+
+    Reads the 'Resumen' sheet and extracts KPIs per center.
+    Returns a history-compatible dict or None on failure.
+    """
+    try:
+        df = pd.read_excel(BytesIO(data_bytes), sheet_name="Resumen", header=None)
+    except Exception:
+        return None
+
+    # Row 0: title — extract month and year
+    title = str(df.iloc[0, 0]) if not pd.isna(df.iloc[0, 0]) else ""
+    # Pattern: "ANÁLISIS DE ABSENTISMO — MES AÑO"
+    m = re.search(r"—\s*(\w+)\s+(\d{4})", title)
+    if not m:
+        return None
+    month_name, year_str = m.group(1).upper(), m.group(2)
+    month_num = _MONTH_NAME_TO_NUM.get(month_name)
+    if not month_num:
+        return None
+    year = int(year_str)
+
+    # Row 2: headers — center names (skip col 0 which is empty, skip "TOTAL")
+    header_row = df.iloc[2]
+    centro_names = []
+    for ci in range(1, len(header_row)):
+        val = str(header_row.iloc[ci]).strip() if not pd.isna(header_row.iloc[ci]) else ""
+        if val and val.upper() != "TOTAL":
+            centro_names.append((ci, val))
+
+    if not centro_names:
+        return None
+
+    # Metric rows start at row 3, in the same order as the export
+    metric_keys = [
+        "plantilla", "plantilla_efectiva", "dias_laborables", "dias_trabajados",
+        "dias_vacaciones", "dias_baja", "dias_ap", "dias_permiso", "dias_excedencia",
+        "total_ausencias_con_vac", "total_ausencias_sin_vac",
+    ]
+
+    centros = []
+    for ci, cname in centro_names:
+        centro_data = {"centro": cname}
+        for ri, key in enumerate(metric_keys):
+            val = df.iloc[3 + ri, ci]
+            centro_data[key] = float(val) if not pd.isna(val) else 0
+        # Percentages are in rows after a blank row (row 3+11=14 is blank, 15 and 16)
+        pct_row_con = 3 + len(metric_keys) + 1  # skip blank row
+        pct_row_sin = pct_row_con + 1
+        pct_con_val = df.iloc[pct_row_con, ci] if pct_row_con < len(df) else 0
+        pct_sin_val = df.iloc[pct_row_sin, ci] if pct_row_sin < len(df) else 0
+        # Values may be decimal (0.0523) or percentage (5.23)
+        pct_con_v = float(pct_con_val) if not pd.isna(pct_con_val) else 0
+        pct_sin_v = float(pct_sin_val) if not pd.isna(pct_sin_val) else 0
+        # If stored as decimal fraction (< 1), convert to percentage
+        if pct_con_v < 1:
+            pct_con_v = round(pct_con_v * 100, 2)
+        if pct_sin_v < 1:
+            pct_sin_v = round(pct_sin_v * 100, 2)
+        centro_data["pct_con"] = pct_con_v
+        centro_data["pct_sin"] = pct_sin_v
+        centros.append(centro_data)
+
+    total_plantilla = sum(c["plantilla"] for c in centros)
+    total_dias_teo = sum(c["plantilla"] * c["dias_laborables"] for c in centros)
+    total_aus_con = sum(c["total_ausencias_con_vac"] for c in centros)
+    total_aus_sin = sum(c["total_ausencias_sin_vac"] for c in centros)
+
+    return {
+        "key": f"{year}-{month_num:02d}",
+        "year": year,
+        "month": month_num,
+        "centros": centros,
+        "total_pct_con": round(total_aus_con / total_dias_teo * 100, 2) if total_dias_teo > 0 else 0,
+        "total_pct_sin": round(total_aus_sin / total_dias_teo * 100, 2) if total_dias_teo > 0 else 0,
+        "total_plantilla": total_plantilla,
+    }
+
+
 # =============================================================================
 # 7. SIDEBAR — FILES + CALENDAR
 # =============================================================================
@@ -1010,10 +1094,17 @@ if "abs_results" in SS:
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             wb = writer.book
-            title_f = wb.add_format({"bold": True, "font_size": 14, "font_color": "#1F3864", "bottom": 2})
+            title_f = wb.add_format({"bold": True, "font_size": 14, "bg_color": "#1F3864", "font_color": "white", "align": "center", "valign": "vcenter"})
             hdr_f = wb.add_format({"bold": True, "font_size": 10, "bg_color": "#1F3864", "font_color": "white", "border": 1, "text_wrap": True, "valign": "vcenter", "align": "center"})
             lbl_f = wb.add_format({"bold": True, "font_size": 10, "border": 1, "bg_color": "#D6DCE4"})
             num_f = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0"})
+            # Yellow highlight for plantilla efectiva
+            lbl_yellow = wb.add_format({"bold": True, "font_size": 10, "border": 1, "bg_color": "#FFD966", "font_color": "#1F3864"})
+            num_yellow = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0.0", "bg_color": "#FFF2CC"})
+            # Red highlight for total ausencias
+            lbl_red = wb.add_format({"bold": True, "font_size": 10, "border": 1, "bg_color": "#FFC7CE", "font_color": "#9C0006"})
+            num_red = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0", "bg_color": "#FFC7CE", "font_color": "#9C0006"})
+            # Percentage formats
             pct_f = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "0.00%"})
             pct_green = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "0.00%", "font_color": "#006100", "bg_color": "#C6EFCE"})
             pct_red = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "0.00%", "font_color": "#9C0006", "bg_color": "#FFC7CE"})
@@ -1031,8 +1122,10 @@ if "abs_results" in SS:
                 ws.set_column(ci, ci, 18)
 
             row = 0
-            ws.merge_range(row, 0, row, len(kpis_list) + 1,
-                           f"ANÁLISIS DE ABSENTISMO — {MONTH_NAMES[r_month]} {r_year}", title_f)
+            ncols = len(kpis_list) + (1 if len(kpis_list) > 1 else 0)
+            ws.merge_range(row, 0, row, ncols,
+                           f"ANÁLISIS DE ABSENTISMO — {MONTH_NAMES[r_month].upper()} {r_year}", title_f)
+            ws.set_row(row, 30)
             row += 2
 
             headers = [""] + [k["centro"] for k in kpis_list]
@@ -1043,26 +1136,33 @@ if "abs_results" in SS:
             ws.set_row(row, 25)
             row += 1
 
+            # Metrics with per-row formatting
             metrics = [
-                ("Plantilla", "plantilla"),
-                ("Plantilla efectiva", "plantilla_efectiva"),
-                ("Días laborables", "dias_laborables"),
-                ("Días trabajados", "dias_trabajados"),
-                ("Vacaciones (días)", "dias_vacaciones"),
-                ("Bajas (días)", "dias_baja"),
-                ("Asuntos Propios (días)", "dias_ap"),
-                ("Permisos (días)", "dias_permiso"),
-                ("Excedencias (días)", "dias_excedencia"),
-                ("Total ausencias (con vac.)", "total_ausencias_con_vac"),
-                ("Total ausencias (sin vac.)", "total_ausencias_sin_vac"),
+                ("Plantilla", "plantilla", lbl_f, num_f),
+                ("Plantilla efectiva", "plantilla_efectiva", lbl_yellow, num_yellow),
+                ("Días laborables", "dias_laborables", lbl_f, num_f),
+                ("Días trabajados", "dias_trabajados", lbl_f, num_f),
+                ("Vacaciones (días)", "dias_vacaciones", lbl_f, num_f),
+                ("Bajas (días)", "dias_baja", lbl_f, num_f),
+                ("Asuntos Propios (días)", "dias_ap", lbl_f, num_f),
+                ("Permisos (días)", "dias_permiso", lbl_f, num_f),
+                ("Excedencias (días)", "dias_excedencia", lbl_f, num_f),
+                ("Total ausencias (con vac.)", "total_ausencias_con_vac", lbl_red, num_red),
+                ("Total ausencias (sin vac.)", "total_ausencias_sin_vac", lbl_red, num_red),
             ]
 
-            for label, key in metrics:
-                ws.write(row, 0, label, lbl_f)
+            for label, key, lfmt, nfmt in metrics:
+                ws.write(row, 0, label, lfmt)
                 for ci, k in enumerate(kpis_list):
-                    ws.write(row, ci + 1, k[key], num_f)
+                    ws.write(row, ci + 1, k[key], nfmt)
                 if len(kpis_list) > 1:
-                    ws.write(row, len(kpis_list) + 1, sum(k[key] for k in kpis_list), num_f)
+                    total_val = sum(k[key] for k in kpis_list)
+                    if key == "plantilla_efectiva":
+                        # Recalculate instead of summing individual values
+                        t_worked = sum(k["dias_trabajados"] for k in kpis_list)
+                        t_wdays = kpis_list[0]["dias_laborables"] if kpis_list else 0
+                        total_val = round(t_worked / t_wdays, 1) if t_wdays > 0 else 0
+                    ws.write(row, len(kpis_list) + 1, total_val, nfmt)
                 row += 1
 
             row += 1
@@ -1084,8 +1184,12 @@ if "abs_results" in SS:
 
             # Legend
             row += 2
-            ws.merge_range(row, 0, row, len(kpis_list) + 1,
+            ws.merge_range(row, 0, row, ncols,
                            "Leyenda: Verde = < 5% absentismo · Sin color = 5%-10% · Rojo = > 10%", legend_f)
+            row += 1
+            ws.merge_range(row, 0, row, ncols,
+                           "Plantilla efectiva = Días trabajados ÷ Días laborables. "
+                           "Indica el nº medio de personas que realmente han trabajado cada día del mes.", legend_f)
 
             ws.print_area(0, 0, row + 1, len(kpis_list) + 1)
             ws.set_landscape()
@@ -1253,11 +1357,49 @@ else:
             )
             st.plotly_chart(fig2, use_container_width=True)
 
-    # Clear history
+    # --- Manage history ---
     with st.expander("Gestionar historial"):
+        # Upload a past report Excel
+        st.markdown("**Subir reporte pasado**")
+        st.caption("Sube un Excel de reporte de absentismo (generado por esta app) para añadirlo al historial.")
+        hist_upload = st.file_uploader(
+            "Excel de reporte", type=["xlsx", "xls"], key="hist_report_upload",
+        )
+        if hist_upload:
+            parsed_entry = parse_report_excel(hist_upload.getvalue())
+            if parsed_entry:
+                month_label = f"{MONTH_NAMES[parsed_entry['month']]} {parsed_entry['year']}"
+                st.success(f"Detectado: **{month_label}** — {len(parsed_entry['centros'])} centro(s)")
+                if st.button(f"Guardar {month_label} en historial", type="primary"):
+                    hist_current = load_abs_history()
+                    hist_current = [h for h in hist_current if h.get("key") != parsed_entry["key"]]
+                    hist_current.append(parsed_entry)
+                    hist_current.sort(key=lambda h: h["key"])
+                    save_abs_history(hist_current)
+                    st.success(f"**{month_label}** guardado en historial")
+                    st.rerun()
+            else:
+                st.error("No se pudo leer el reporte. Asegúrate de que tiene la hoja 'Resumen' con el formato correcto.")
+
+        # Individual month deletion
+        st.divider()
+        st.markdown("**Eliminar meses individuales**")
         for h in hist:
-            st.text(f"{MONTH_NAMES[h['month']]} {h['year']} — Plantilla: {h['total_plantilla']} — "
-                    f"Abs. con vac: {h['total_pct_con']:.2f}% — sin vac: {h['total_pct_sin']:.2f}%")
+            col_info, col_btn = st.columns([4, 1])
+            with col_info:
+                st.text(
+                    f"{MONTH_NAMES[h['month']]} {h['year']} — "
+                    f"Plantilla: {h['total_plantilla']} — "
+                    f"Con vac: {h['total_pct_con']:.2f}% — Sin vac: {h['total_pct_sin']:.2f}%"
+                )
+            with col_btn:
+                if st.button("Eliminar", key=f"del_hist_{h['key']}", type="secondary"):
+                    hist_current = load_abs_history()
+                    hist_current = [x for x in hist_current if x.get("key") != h["key"]]
+                    save_abs_history(hist_current)
+                    st.rerun()
+
+        st.divider()
         if st.button("Limpiar todo el historial", type="secondary"):
             save_abs_history([])
             st.rerun()
