@@ -72,23 +72,89 @@ def get_default_holidays(year):
 
 
 # =============================================================================
-# 2. CUSTOM CALENDAR — persistent JSON
+# 2. CUSTOM CALENDAR — persistent JSON (supports per-center calendars)
 # =============================================================================
 CALENDAR_FILE = Path(__file__).resolve().parent.parent / "data" / "calendario_laboral.json"
 EMPLOYEES_FILE = Path(__file__).resolve().parent.parent / "data" / "plantilla_empleados.json"
+CENTROS_FILE = Path(__file__).resolve().parent.parent / "data" / "centros_trabajo.json"
+
+
+def _load_raw_calendar():
+    """Load raw calendar JSON, migrating old flat format if needed."""
+    if not CALENDAR_FILE.exists():
+        return {"__default__": None, "centros": {}}
+    with open(CALENDAR_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    # Migrate old flat format: {"2026-01-01": true, ...} → new structure
+    if isinstance(data, dict) and "__default__" not in data and "centros" not in data:
+        return {"__default__": data, "centros": {}}
+    return data
 
 
 def load_custom_calendar():
-    if CALENDAR_FILE.exists():
-        with open(CALENDAR_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
+    """Load the default custom calendar (backward compatible)."""
+    raw = _load_raw_calendar()
+    return raw.get("__default__")
+
+
+def load_center_calendars():
+    """Load per-center calendars: {centro_name: {date_str: bool}}."""
+    raw = _load_raw_calendar()
+    return raw.get("centros", {})
+
+
+def get_calendar_for_centro(centro_name, default_cal=None):
+    """Get the calendar for a specific center. Falls back to default if none set."""
+    center_cals = load_center_calendars()
+    # Try exact match, then case-insensitive partial match
+    for key, cal in center_cals.items():
+        if key.upper() == centro_name.upper() or key.upper() in centro_name.upper() or centro_name.upper() in key.upper():
+            return cal
+    return default_cal
 
 
 def save_custom_calendar(data):
+    """Save the default calendar (backward compatible)."""
+    raw = _load_raw_calendar()
+    raw["__default__"] = data
     CALENDAR_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(CALENDAR_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(raw, f, ensure_ascii=False, indent=2)
+
+
+def save_center_calendar(centro_name, data):
+    """Save a calendar for a specific center."""
+    raw = _load_raw_calendar()
+    if "centros" not in raw:
+        raw["centros"] = {}
+    raw["centros"][centro_name] = data
+    CALENDAR_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(CALENDAR_FILE, "w", encoding="utf-8") as f:
+        json.dump(raw, f, ensure_ascii=False, indent=2)
+
+
+def delete_center_calendar(centro_name):
+    """Remove a center-specific calendar."""
+    raw = _load_raw_calendar()
+    if "centros" in raw and centro_name in raw["centros"]:
+        del raw["centros"][centro_name]
+        with open(CALENDAR_FILE, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False, indent=2)
+
+
+def load_centros_trabajo():
+    """Load the list of registered work centers."""
+    if CENTROS_FILE.exists():
+        with open(CENTROS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def save_centros_trabajo(centros):
+    """Save the list of registered work centers."""
+    CENTROS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(CENTROS_FILE, "w", encoding="utf-8") as f:
+        json.dump(centros, f, ensure_ascii=False, indent=2)
 
 
 def generate_calendar_template(year):
@@ -751,8 +817,11 @@ st.sidebar.divider()
 st.sidebar.subheader("Calendario laboral")
 
 custom_cal = load_custom_calendar()
+center_cals = load_center_calendars()
 if custom_cal:
-    st.sidebar.success("Calendario personalizado cargado")
+    st.sidebar.success("Calendario por defecto cargado")
+if center_cals:
+    st.sidebar.info(f"Calendarios por centro: {', '.join(sorted(center_cals.keys()))}")
 
 cal_year_tmpl = st.sidebar.number_input("Año plantilla", 2020, 2030, date.today().year, key="cal_year_tmpl")
 st.sidebar.download_button(
@@ -763,21 +832,87 @@ st.sidebar.download_button(
     use_container_width=True,
 )
 
-cal_upload = st.sidebar.file_uploader("Subir calendario cumplimentado", type=["xlsx", "xls"], key="cal_up")
-if cal_upload:
-    parsed_cal = parse_calendar_upload(cal_upload.getvalue())
-    if parsed_cal:
-        save_custom_calendar(parsed_cal)
-        custom_cal = parsed_cal
-        st.sidebar.success("Calendario guardado")
-    else:
-        st.sidebar.error("No se pudo leer el calendario")
+_cal_mode = st.sidebar.radio(
+    "Subir calendario para:",
+    ["Por defecto (todos los centros)", "Centro específico"],
+    key="cal_upload_mode",
+    horizontal=True,
+)
 
-if custom_cal and st.sidebar.button("Borrar calendario personalizado", type="secondary"):
-    if CALENDAR_FILE.exists():
-        CALENDAR_FILE.unlink()
-    custom_cal = None
-    st.rerun()
+if _cal_mode == "Centro específico":
+    centros_registrados = load_centros_trabajo()
+    _cal_centro_opts = centros_registrados if centros_registrados else []
+    _cal_centro_name = st.sidebar.text_input(
+        "Nombre del centro",
+        placeholder="Ej: Almacén Pamplona",
+        key="cal_centro_name",
+        help="Debe coincidir con el nombre del fichero del cuadrante (sin extensión)." + (
+            f" Centros registrados: {', '.join(_cal_centro_opts)}" if _cal_centro_opts else ""
+        ),
+    )
+    cal_upload = st.sidebar.file_uploader("Subir calendario del centro", type=["xlsx", "xls"], key="cal_up_centro")
+    if cal_upload and _cal_centro_name.strip():
+        parsed_cal = parse_calendar_upload(cal_upload.getvalue())
+        if parsed_cal:
+            save_center_calendar(_cal_centro_name.strip(), parsed_cal)
+            center_cals = load_center_calendars()
+            st.sidebar.success(f"Calendario de **{_cal_centro_name.strip()}** guardado")
+        else:
+            st.sidebar.error("No se pudo leer el calendario")
+    elif cal_upload and not _cal_centro_name.strip():
+        st.sidebar.warning("Indica el nombre del centro antes de subir el calendario")
+else:
+    cal_upload = st.sidebar.file_uploader("Subir calendario cumplimentado", type=["xlsx", "xls"], key="cal_up")
+    if cal_upload:
+        parsed_cal = parse_calendar_upload(cal_upload.getvalue())
+        if parsed_cal:
+            save_custom_calendar(parsed_cal)
+            custom_cal = parsed_cal
+            st.sidebar.success("Calendario por defecto guardado")
+        else:
+            st.sidebar.error("No se pudo leer el calendario")
+
+# Delete calendars
+if custom_cal or center_cals:
+    with st.sidebar.expander("Gestionar calendarios"):
+        if custom_cal:
+            if st.button("Borrar calendario por defecto", key="del_cal_default", type="secondary"):
+                raw = _load_raw_calendar()
+                raw["__default__"] = None
+                with open(CALENDAR_FILE, "w", encoding="utf-8") as f:
+                    json.dump(raw, f, ensure_ascii=False, indent=2)
+                st.rerun()
+        for cname in sorted(center_cals.keys()):
+            if st.button(f"Borrar calendario: {cname}", key=f"del_cal_{cname}", type="secondary"):
+                delete_center_calendar(cname)
+                st.rerun()
+
+# --- Centros de trabajo ---
+st.sidebar.divider()
+st.sidebar.subheader("Centros de trabajo")
+st.sidebar.caption("Registra los centros para facilitar la asignación de calendarios.")
+centros_registrados = load_centros_trabajo()
+if centros_registrados:
+    st.sidebar.success(f"{len(centros_registrados)} centro(s): {', '.join(centros_registrados)}")
+_nuevo_centro = st.sidebar.text_input("Añadir centro", placeholder="Ej: Almacén Pamplona", key="nuevo_centro_input")
+if st.sidebar.button("Registrar centro", key="btn_add_centro"):
+    if _nuevo_centro.strip():
+        centros_registrados = load_centros_trabajo()
+        if _nuevo_centro.strip() not in centros_registrados:
+            centros_registrados.append(_nuevo_centro.strip())
+            save_centros_trabajo(centros_registrados)
+            st.rerun()
+        else:
+            st.sidebar.warning("El centro ya existe")
+    else:
+        st.sidebar.warning("Escribe un nombre de centro")
+if centros_registrados:
+    with st.sidebar.expander("Eliminar centros"):
+        for cn in centros_registrados:
+            if st.button(f"Eliminar: {cn}", key=f"del_centro_{cn}", type="secondary"):
+                centros_registrados = [c for c in centros_registrados if c != cn]
+                save_centros_trabajo(centros_registrados)
+                st.rerun()
 
 # --- Employee list (optional override) ---
 st.sidebar.divider()
@@ -842,10 +977,12 @@ nw_days = get_non_working_days(sel_year, sel_month, custom_cal)
 holidays_default = get_default_holidays(sel_year)
 month_holidays = {d: n for d, n in holidays_default.items() if d.month == sel_month}
 cal_source = "calendario personalizado" if custom_cal else "Navarra (nacional + foral)"
-st.caption(
-    f"**{MONTH_NAMES[sel_month]} {sel_year}**: {w_days} días laborables — {cal_source}"
-    + (f" · Festivos: {', '.join(f'{d.day}-{n}' for d, n in sorted(month_holidays.items()))}" if month_holidays and not custom_cal else "")
-)
+cal_info = f"**{MONTH_NAMES[sel_month]} {sel_year}**: {w_days} días laborables — {cal_source}"
+if month_holidays and not custom_cal:
+    cal_info += f" · Festivos: {', '.join(f'{d.day}-{n}' for d, n in sorted(month_holidays.items()))}"
+if center_cals:
+    cal_info += f" · Calendarios específicos: {', '.join(sorted(center_cals.keys()))}"
+st.caption(cal_info)
 
 # =============================================================================
 # 9. PROCESS
@@ -857,7 +994,10 @@ if st.button("Analizar Absentismo", type="primary", use_container_width=True):
 
     for fname, fdata in SS["abs_file_data"]:
         centro_name = fname.rsplit(".", 1)[0]
-        parsed, warns = parse_cuadrante(fdata, fname, non_working_days=nw_days)
+        # Use center-specific calendar if available, else default
+        centro_cal = get_calendar_for_centro(centro_name, custom_cal)
+        centro_nw_days = get_non_working_days(sel_year, sel_month, centro_cal)
+        parsed, warns = parse_cuadrante(fdata, fname, non_working_days=centro_nw_days)
         if parsed is None:
             st.error(f"Error procesando **{fname}**: {'; '.join(w if isinstance(w, str) else w.get('mensaje', '') for w in warns)}")
             continue
@@ -871,7 +1011,7 @@ if st.button("Analizar Absentismo", type="primary", use_container_width=True):
                     break
             if allowed:
                 parsed["employees"] = [e for e in parsed["employees"] if e["nombre"].upper() in allowed]
-        kpis = calculate_kpis(parsed, sel_year, sel_month, custom_cal)
+        kpis = calculate_kpis(parsed, sel_year, sel_month, centro_cal)
         kpis["centro"] = centro_name
         all_results.append(kpis)
         all_warnings[centro_name] = warns
@@ -919,8 +1059,8 @@ if "abs_results" in SS:
     pct_con = round(total_ausencias_con / total_dias_teo * 100, 2) if total_dias_teo > 0 else 0
     pct_sin = round(total_ausencias_sin / total_dias_teo * 100, 2) if total_dias_teo > 0 else 0
 
-    total_dias_lab = kpis_list[0]["dias_laborables"] if kpis_list else 0
-    total_plantilla_efectiva = round(total_trabajados / total_dias_lab, 2) if total_dias_lab > 0 else 0
+    # Sum individual plantilla efectiva (each center may have different working days)
+    total_plantilla_efectiva = round(sum(k["plantilla_efectiva"] for k in kpis_list), 2)
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Plantilla total", total_plantilla)
@@ -995,7 +1135,7 @@ if "abs_results" in SS:
                 merge_emp_details = {c: all_employees[c] for c in selected_to_merge if c in all_employees}
                 merged_employees = merge_employee_records(merge_emp_details)
                 merged_parsed = {"employees": merged_employees}
-                merged_kpis = calculate_kpis(merged_parsed, r_year, r_month, custom_cal)
+                merged_kpis = calculate_kpis(merged_parsed, r_year, r_month, get_calendar_for_centro(merged_name, custom_cal))
                 merged_kpis["centro"] = merged_name
 
                 new_kpis = [k for k in kpis_list if k["centro"] not in selected_to_merge] + [merged_kpis]
@@ -1069,9 +1209,12 @@ if "abs_results" in SS:
             if i < len(kpis_list):
                 show_kpi_detail(kpis_list[i], all_employees.get(kpis_list[i]["centro"], []))
             else:
+                # Show range if centers have different working days
+                all_wdays = set(k["dias_laborables"] for k in kpis_list)
+                avg_wdays = round(sum(k["dias_laborables"] for k in kpis_list) / len(kpis_list)) if kpis_list else 0
                 consol = {
                     "plantilla": total_plantilla,
-                    "dias_laborables": kpis_list[0]["dias_laborables"],
+                    "dias_laborables": avg_wdays,
                     "dias_trabajados": total_trabajados,
                     "dias_vacaciones": sum(k["dias_vacaciones"] for k in kpis_list),
                     "dias_baja": sum(k["dias_baja"] for k in kpis_list),
@@ -1158,10 +1301,11 @@ if "abs_results" in SS:
                 if len(kpis_list) > 1:
                     total_val = sum(k[key] for k in kpis_list)
                     if key == "plantilla_efectiva":
-                        # Recalculate instead of summing individual values
-                        t_worked = sum(k["dias_trabajados"] for k in kpis_list)
-                        t_wdays = kpis_list[0]["dias_laborables"] if kpis_list else 0
-                        total_val = round(t_worked / t_wdays, 1) if t_wdays > 0 else 0
+                        # Sum individual center effective headcounts
+                        total_val = round(sum(k["plantilla_efectiva"] for k in kpis_list), 1)
+                    elif key == "dias_laborables":
+                        # Show average when centers differ
+                        total_val = round(total_val / len(kpis_list))
                     ws.write(row, len(kpis_list) + 1, total_val, nfmt)
                 row += 1
 
@@ -1356,6 +1500,295 @@ else:
                 legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"),
             )
             st.plotly_chart(fig2, use_container_width=True)
+
+    # --- Download historical Excel ---
+    def build_historical_excel(hist_data):
+        """Build a comprehensive Excel with historical analysis, charts, and per-month detail tabs."""
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            wb = writer.book
+
+            # === Formats ===
+            title_f = wb.add_format({"bold": True, "font_size": 16, "bg_color": "#1F3864", "font_color": "white", "align": "center", "valign": "vcenter"})
+            subtitle_f = wb.add_format({"bold": True, "font_size": 12, "bg_color": "#2E75B6", "font_color": "white", "align": "center", "valign": "vcenter"})
+            hdr_f = wb.add_format({"bold": True, "font_size": 10, "bg_color": "#1F3864", "font_color": "white", "border": 1, "text_wrap": True, "valign": "vcenter", "align": "center"})
+            lbl_f = wb.add_format({"bold": True, "font_size": 10, "border": 1, "bg_color": "#D6DCE4"})
+            num_f = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0"})
+            num_dec_f = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0.0"})
+            pct_f = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "0.00%"})
+            pct_green = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "0.00%", "font_color": "#006100", "bg_color": "#C6EFCE"})
+            pct_yellow = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "0.00%", "font_color": "#9C6500", "bg_color": "#FFEB9C"})
+            pct_red = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "0.00%", "font_color": "#9C0006", "bg_color": "#FFC7CE"})
+            lbl_yellow = wb.add_format({"bold": True, "font_size": 10, "border": 1, "bg_color": "#FFD966", "font_color": "#1F3864"})
+            num_yellow = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0.0", "bg_color": "#FFF2CC"})
+            lbl_red = wb.add_format({"bold": True, "font_size": 10, "border": 1, "bg_color": "#FFC7CE", "font_color": "#9C0006"})
+            num_red = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0", "bg_color": "#FFC7CE", "font_color": "#9C0006"})
+            legend_f = wb.add_format({"font_size": 9, "italic": True, "text_wrap": True})
+
+            def wpct(ws, r, c, v):
+                fmt = pct_green if v < 0.05 else (pct_red if v > 0.10 else pct_yellow)
+                ws.write_number(r, c, v, fmt)
+
+            # ===============================================================
+            # SHEET 1: Resumen Histórico (trend table + chart)
+            # ===============================================================
+            sn = "Resumen Histórico"
+            pd.DataFrame().to_excel(writer, sheet_name=sn, index=False)
+            ws = writer.sheets[sn]
+
+            # Collect all unique centers across history
+            all_centros_hist = []
+            for h in hist_data:
+                for c in h["centros"]:
+                    if c["centro"] not in all_centros_hist:
+                        all_centros_hist.append(c["centro"])
+
+            # Title
+            row = 0
+            ncols = 4 + len(all_centros_hist) * 2  # Mes, Plantilla, %Con, %Sin + per-center %con/%sin
+            ws.merge_range(row, 0, row, max(ncols, 5),
+                           "REPORTE HISTÓRICO DE ABSENTISMO", title_f)
+            ws.set_row(row, 35)
+            row += 2
+
+            # --- Trend table ---
+            # Headers
+            trend_headers = ["Mes", "Plantilla"]
+            if len(all_centros_hist) > 1:
+                for cn in all_centros_hist:
+                    short = cn[:15] if len(cn) > 15 else cn
+                    trend_headers.append(f"% Con Vac.\n{short}")
+                    trend_headers.append(f"% Sin Vac.\n{short}")
+            trend_headers.append("% Con Vac. TOTAL")
+            trend_headers.append("% Sin Vac. TOTAL")
+
+            for ci, h_txt in enumerate(trend_headers):
+                ws.write(row, ci, h_txt, hdr_f)
+            ws.set_row(row, 30)
+            row += 1
+
+            data_start_row = row
+            for h in hist_data:
+                label = f"{MONTH_NAMES[h['month']]} {h['year']}"
+                ws.write(row, 0, label, lbl_f)
+                ws.write(row, 1, h["total_plantilla"], num_f)
+                ci = 2
+                if len(all_centros_hist) > 1:
+                    for cn in all_centros_hist:
+                        centro_data = next((c for c in h["centros"] if c["centro"] == cn), None)
+                        if centro_data:
+                            wpct(ws, row, ci, centro_data["pct_con"] / 100)
+                            wpct(ws, row, ci + 1, centro_data["pct_sin"] / 100)
+                        else:
+                            ws.write(row, ci, "", num_f)
+                            ws.write(row, ci + 1, "", num_f)
+                        ci += 2
+                wpct(ws, row, ci, h["total_pct_con"] / 100)
+                wpct(ws, row, ci + 1, h["total_pct_sin"] / 100)
+                row += 1
+            data_end_row = row - 1
+
+            # Column widths
+            ws.set_column(0, 0, 20)
+            ws.set_column(1, 1, 12)
+            for ci in range(2, len(trend_headers)):
+                ws.set_column(ci, ci, 16)
+
+            # --- Chart: Absenteeism trend ---
+            if len(hist_data) >= 2:
+                row += 1
+                chart = wb.add_chart({"type": "line"})
+                chart.set_title({"name": "Evolución del Absentismo"})
+                chart.set_y_axis({"name": "% Absentismo", "num_format": "0.00%"})
+                chart.set_x_axis({"name": ""})
+                chart.set_size({"width": 800, "height": 420})
+                chart.set_legend({"position": "bottom"})
+
+                # Total con vacaciones
+                total_con_col = len(trend_headers) - 2
+                total_sin_col = len(trend_headers) - 1
+                chart.add_series({
+                    "name": "Con vacaciones (Total)",
+                    "categories": [sn, data_start_row, 0, data_end_row, 0],
+                    "values": [sn, data_start_row, total_con_col, data_end_row, total_con_col],
+                    "line": {"color": "#FF5722", "width": 2.5},
+                    "marker": {"type": "circle", "size": 6, "fill": {"color": "#FF5722"}},
+                })
+                chart.add_series({
+                    "name": "Sin vacaciones (Total)",
+                    "categories": [sn, data_start_row, 0, data_end_row, 0],
+                    "values": [sn, data_start_row, total_sin_col, data_end_row, total_sin_col],
+                    "line": {"color": "#2196F3", "width": 2.5},
+                    "marker": {"type": "circle", "size": 6, "fill": {"color": "#2196F3"}},
+                })
+
+                # Per-center series (sin vac only, to avoid clutter)
+                colors_chart = ["#4CAF50", "#FF9800", "#9C27B0", "#00BCD4", "#795548", "#607D8B"]
+                if len(all_centros_hist) > 1:
+                    for idx, cn in enumerate(all_centros_hist):
+                        sin_col = 2 + idx * 2 + 1  # %Sin Vac column for this center
+                        chart.add_series({
+                            "name": f"{cn} (sin vac.)",
+                            "categories": [sn, data_start_row, 0, data_end_row, 0],
+                            "values": [sn, data_start_row, sin_col, data_end_row, sin_col],
+                            "line": {"color": colors_chart[idx % len(colors_chart)], "width": 1.5, "dash_type": "dash"},
+                            "marker": {"type": "diamond", "size": 4},
+                        })
+
+                ws.insert_chart(row, 0, chart)
+                row += 22  # chart height in rows
+
+            # Legend
+            row += 1
+            ws.merge_range(row, 0, row, max(ncols, 5),
+                           "Verde = < 5% · Amarillo = 5%-10% · Rojo = > 10%", legend_f)
+            row += 1
+            ws.merge_range(row, 0, row, max(ncols, 5),
+                           "% Con Vac. = (V+B+AP+P+E) / Días teóricos × 100 · "
+                           "% Sin Vac. = (B+AP+P+E) / Días teóricos × 100", legend_f)
+
+            ws.set_landscape()
+            ws.fit_to_pages(1, 0)
+
+            # ===============================================================
+            # SHEETS 2+: One per month with full detail
+            # ===============================================================
+            for h in hist_data:
+                month_label = f"{MONTH_NAMES[h['month']]} {h['year']}"
+                safe_sn = month_label[:31]
+                pd.DataFrame().to_excel(writer, sheet_name=safe_sn, index=False)
+                ws_m = writer.sheets[safe_sn]
+
+                centros = h["centros"]
+                ncols_m = len(centros) + (1 if len(centros) > 1 else 0)
+
+                # Title
+                row_m = 0
+                ws_m.merge_range(row_m, 0, row_m, ncols_m,
+                                 f"ANÁLISIS DE ABSENTISMO — {month_label.upper()}", title_f)
+                ws_m.set_row(row_m, 30)
+                row_m += 2
+
+                # Headers
+                hdrs = [""] + [c["centro"] for c in centros]
+                if len(centros) > 1:
+                    hdrs.append("TOTAL")
+                for ci, h_txt in enumerate(hdrs):
+                    ws_m.write(row_m, ci, h_txt, hdr_f)
+                ws_m.set_row(row_m, 25)
+                row_m += 1
+
+                # Metric rows
+                metrics_hist = [
+                    ("Plantilla", "plantilla", lbl_f, num_f),
+                    ("Plantilla efectiva", "plantilla_efectiva", lbl_yellow, num_yellow),
+                    ("Días laborables", "dias_laborables", lbl_f, num_f),
+                    ("Días trabajados", "dias_trabajados", lbl_f, num_f),
+                    ("Vacaciones (días)", "dias_vacaciones", lbl_f, num_f),
+                    ("Bajas (días)", "dias_baja", lbl_f, num_f),
+                    ("Asuntos Propios (días)", "dias_ap", lbl_f, num_f),
+                    ("Permisos (días)", "dias_permiso", lbl_f, num_f),
+                    ("Excedencias (días)", "dias_excedencia", lbl_f, num_f),
+                    ("Total ausencias (con vac.)", "total_ausencias_con_vac", lbl_red, num_red),
+                    ("Total ausencias (sin vac.)", "total_ausencias_sin_vac", lbl_red, num_red),
+                ]
+
+                for label, key, lfmt, nfmt in metrics_hist:
+                    ws_m.write(row_m, 0, label, lfmt)
+                    for ci, c in enumerate(centros):
+                        val = c.get(key, 0)
+                        ws_m.write(row_m, ci + 1, val, nfmt)
+                    if len(centros) > 1:
+                        if key == "plantilla_efectiva":
+                            t_worked = sum(c.get("dias_trabajados", 0) for c in centros)
+                            t_wdays = centros[0].get("dias_laborables", 1) if centros else 1
+                            total_val = round(t_worked / t_wdays, 1) if t_wdays > 0 else 0
+                        elif key == "dias_laborables":
+                            total_val = centros[0].get(key, 0) if centros else 0
+                        else:
+                            total_val = sum(c.get(key, 0) for c in centros)
+                        ws_m.write(row_m, len(centros) + 1, total_val, nfmt)
+                    row_m += 1
+
+                # Percentages
+                row_m += 1
+                ws_m.write(row_m, 0, "% Absentismo CON vacaciones", lbl_f)
+                for ci, c in enumerate(centros):
+                    wpct(ws_m, row_m, ci + 1, c.get("pct_con", 0) / 100)
+                if len(centros) > 1:
+                    wpct(ws_m, row_m, len(centros) + 1, h.get("total_pct_con", 0) / 100)
+                row_m += 1
+
+                ws_m.write(row_m, 0, "% Absentismo SIN vacaciones", lbl_f)
+                for ci, c in enumerate(centros):
+                    wpct(ws_m, row_m, ci + 1, c.get("pct_sin", 0) / 100)
+                if len(centros) > 1:
+                    wpct(ws_m, row_m, len(centros) + 1, h.get("total_pct_sin", 0) / 100)
+
+                # Mini chart per month (bar chart comparing centers)
+                if len(centros) > 1:
+                    row_m += 2
+                    # Write data for chart
+                    chart_data_row = row_m
+                    ws_m.write(row_m, 0, "", lbl_f)
+                    for ci, c in enumerate(centros):
+                        ws_m.write(row_m, ci + 1, c["centro"], hdr_f)
+                    row_m += 1
+                    ws_m.write(row_m, 0, "% Con Vac.", lbl_f)
+                    for ci, c in enumerate(centros):
+                        ws_m.write_number(row_m, ci + 1, c.get("pct_con", 0) / 100, pct_f)
+                    row_m += 1
+                    ws_m.write(row_m, 0, "% Sin Vac.", lbl_f)
+                    for ci, c in enumerate(centros):
+                        ws_m.write_number(row_m, ci + 1, c.get("pct_sin", 0) / 100, pct_f)
+
+                    chart_m = wb.add_chart({"type": "column"})
+                    chart_m.set_title({"name": f"Absentismo por centro — {month_label}"})
+                    chart_m.set_y_axis({"name": "%", "num_format": "0.00%"})
+                    chart_m.set_size({"width": 600, "height": 350})
+                    chart_m.set_legend({"position": "bottom"})
+                    chart_m.add_series({
+                        "name": "Con vacaciones",
+                        "categories": [safe_sn, chart_data_row, 1, chart_data_row, len(centros)],
+                        "values": [safe_sn, chart_data_row + 1, 1, chart_data_row + 1, len(centros)],
+                        "fill": {"color": "#FF5722"},
+                    })
+                    chart_m.add_series({
+                        "name": "Sin vacaciones",
+                        "categories": [safe_sn, chart_data_row, 1, chart_data_row, len(centros)],
+                        "values": [safe_sn, chart_data_row + 2, 1, chart_data_row + 2, len(centros)],
+                        "fill": {"color": "#2196F3"},
+                    })
+                    row_m += 2
+                    ws_m.insert_chart(row_m, 0, chart_m)
+                    row_m += 18
+
+                # Legend
+                row_m += 2
+                ws_m.merge_range(row_m, 0, row_m, ncols_m,
+                                 "Verde = < 5% · Amarillo = 5%-10% · Rojo = > 10%", legend_f)
+                row_m += 1
+                ws_m.merge_range(row_m, 0, row_m, ncols_m,
+                                 "Plantilla efectiva = Días trabajados / Días laborables", legend_f)
+
+                # Column widths
+                ws_m.set_column(0, 0, 30)
+                for ci in range(1, ncols_m + 1):
+                    ws_m.set_column(ci, ci, 18)
+                ws_m.set_landscape()
+                ws_m.fit_to_pages(1, 0)
+
+        return output.getvalue()
+
+    hist_excel = build_historical_excel(hist)
+    st.download_button(
+        "Descargar Reporte Histórico (Excel)",
+        hist_excel,
+        file_name="HISTORICO_ABSENTISMO.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        type="primary",
+    )
 
     # --- Manage history ---
     with st.expander("Gestionar historial"):

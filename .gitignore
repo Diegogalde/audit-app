@@ -7,4 +7,8 @@ build/
 .env
 data/_tmp_aliases.xlsx
 data/audit_history.json
+data/absentismo_historico.json
+data/calendario_laboral.json
+data/plantilla_empleados.json
+data/centros_trabajo.json
 .streamlit/secrets.toml
