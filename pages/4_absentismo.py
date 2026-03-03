@@ -193,6 +193,79 @@ def generate_employee_template():
     return buf.getvalue()
 
 
+def generate_cuadrante_template(year, month):
+    """Generate a blank monthly schedule template matching the format the parser expects."""
+    max_day = calendar.monthrange(year, month)[1]
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        wb = writer.book
+        ws = wb.add_worksheet("Cuadrante")
+
+        # Formats
+        title_f = wb.add_format({"bold": True, "font_size": 14, "align": "center", "valign": "vcenter", "bg_color": "#1F3864", "font_color": "white"})
+        hdr_f = wb.add_format({"bold": True, "font_size": 10, "bg_color": "#1F3864", "font_color": "white", "border": 1, "align": "center", "valign": "vcenter"})
+        hdr_we_f = wb.add_format({"bold": True, "font_size": 10, "bg_color": "#D6DCE4", "font_color": "#1F3864", "border": 1, "align": "center", "valign": "vcenter"})
+        name_f = wb.add_format({"bold": True, "font_size": 10, "border": 1, "bg_color": "#D9E2F3", "valign": "vcenter"})
+        cell_f = wb.add_format({"font_size": 10, "border": 1, "align": "center", "valign": "vcenter"})
+        legend_title_f = wb.add_format({"bold": True, "font_size": 10, "bg_color": "#1F3864", "font_color": "white", "border": 1})
+        legend_f = wb.add_format({"font_size": 9, "border": 1, "text_wrap": True})
+
+        month_name = MONTH_NAMES[month]
+        day_abbr = ["L", "M", "X", "J", "V", "S", "D"]
+
+        # Row 0: title
+        ws.merge_range(0, 0, 0, max_day, f"CUADRANTE — {month_name.upper()} {year}", title_f)
+        ws.set_row(0, 30)
+
+        # Row 1: header — "Empleado" + day numbers
+        ws.write(1, 0, "Empleado", hdr_f)
+        for d in range(1, max_day + 1):
+            wd = date(year, month, d).weekday()
+            fmt = hdr_we_f if wd >= 5 else hdr_f
+            ws.write(1, d, d, fmt)
+        ws.set_row(1, 22)
+
+        # Row 2: day-of-week letters
+        ws.write(2, 0, "", hdr_f)
+        for d in range(1, max_day + 1):
+            wd = date(year, month, d).weekday()
+            fmt = hdr_we_f if wd >= 5 else hdr_f
+            ws.write(2, d, day_abbr[wd], fmt)
+
+        # Rows 3-22: 20 blank employee rows
+        for ri in range(20):
+            ws.write(3 + ri, 0, "", name_f)
+            for d in range(1, max_day + 1):
+                ws.write(3 + ri, d, "", cell_f)
+
+        # Column widths
+        ws.set_column(0, 0, 30)
+        ws.set_column(1, max_day, 4.5)
+
+        # Legend below
+        legend_row = 25
+        ws.merge_range(legend_row, 0, legend_row, 5, "CÓDIGOS DE AUSENCIA", legend_title_f)
+        codes = [
+            ("Número (8, 7.5, etc.)", "Jornada trabajada (horas)"),
+            ("V", "Vacaciones"),
+            ("B", "Baja (IT / enfermedad)"),
+            ("AP", "Asuntos propios"),
+            ("P", "Permiso no retribuido"),
+            ("PR", "Permiso retribuido"),
+            ("E", "Excedencia"),
+        ]
+        for i, (code, desc) in enumerate(codes):
+            ws.write(legend_row + 1 + i, 0, code, legend_f)
+            ws.merge_range(legend_row + 1 + i, 1, legend_row + 1 + i, 5, desc, legend_f)
+
+        ws.freeze_panes(3, 1)
+        ws.print_area(0, 0, 22, max_day)
+        ws.set_landscape()
+        ws.fit_to_pages(1, 0)
+
+    return buf.getvalue()
+
+
 def parse_employee_upload(data_bytes):
     """Parse uploaded employee Excel → {centro: [name1, name2, ...]}"""
     df = pd.read_excel(BytesIO(data_bytes), sheet_name=0)
@@ -511,6 +584,7 @@ def calculate_kpis(parsed, year, month, custom_cal=None):
     total_E = sum(e["E"] for e in emps)
 
     dias_teoricos = n * w_days
+    plantilla_efectiva = round(total_worked / w_days, 2) if w_days > 0 else 0
 
     ausencias_con_vac = total_V + total_B + total_AP + total_P + total_E
     pct_absent_con = (ausencias_con_vac / dias_teoricos * 100) if dias_teoricos > 0 else 0
@@ -520,6 +594,7 @@ def calculate_kpis(parsed, year, month, custom_cal=None):
 
     return {
         "plantilla": n,
+        "plantilla_efectiva": plantilla_efectiva,
         "dias_laborables": w_days,
         "dias_teoricos": dias_teoricos,
         "dias_trabajados": total_worked,
@@ -571,6 +646,21 @@ uploaded_files = st.sidebar.file_uploader(
 if uploaded_files:
     SS["abs_file_data"] = [(f.name, f.getvalue()) for f in uploaded_files]
     st.sidebar.success(f"{len(uploaded_files)} fichero(s) cargado(s)")
+
+# --- Blank cuadrante template ---
+st.sidebar.divider()
+st.sidebar.subheader("Plantilla cuadrante en blanco")
+st.sidebar.caption("Descarga una plantilla vacía del mes para cumplimentar con los datos de cualquier cliente.")
+_tc1, _tc2 = st.sidebar.columns(2)
+tmpl_month = _tc1.selectbox("Mes", range(1, 13), format_func=lambda m: MONTH_NAMES[m], index=date.today().month - 1, key="tmpl_cuad_month")
+tmpl_year = _tc2.number_input("Año", 2020, 2030, date.today().year, key="tmpl_cuad_year")
+st.sidebar.download_button(
+    "Descargar cuadrante en blanco",
+    generate_cuadrante_template(tmpl_year, tmpl_month),
+    file_name=f"cuadrante_{MONTH_NAMES[tmpl_month].lower()}_{tmpl_year}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
+)
 
 # --- Custom calendar ---
 st.sidebar.divider()
@@ -745,11 +835,15 @@ if "abs_results" in SS:
     pct_con = round(total_ausencias_con / total_dias_teo * 100, 2) if total_dias_teo > 0 else 0
     pct_sin = round(total_ausencias_sin / total_dias_teo * 100, 2) if total_dias_teo > 0 else 0
 
-    m1, m2, m3, m4 = st.columns(4)
+    total_dias_lab = kpis_list[0]["dias_laborables"] if kpis_list else 0
+    total_plantilla_efectiva = round(total_trabajados / total_dias_lab, 2) if total_dias_lab > 0 else 0
+
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Plantilla total", total_plantilla)
-    m2.metric("Días trabajados", f"{total_trabajados:,}")
-    m3.metric("Absentismo (con vac.)", f"{pct_con:.2f}%")
-    m4.metric("Absentismo (sin vac.)", f"{pct_sin:.2f}%")
+    m2.metric("Plantilla efectiva", f"{total_plantilla_efectiva:.1f}")
+    m3.metric("Días trabajados", f"{total_trabajados:,}")
+    m4.metric("Absentismo (con vac.)", f"{pct_con:.2f}%")
+    m5.metric("Absentismo (sin vac.)", f"{pct_sin:.2f}%")
 
     # --- Duplicate detection & interactive merge ---
     duplicates = res.get("duplicates", {})
@@ -951,6 +1045,7 @@ if "abs_results" in SS:
 
             metrics = [
                 ("Plantilla", "plantilla"),
+                ("Plantilla efectiva", "plantilla_efectiva"),
                 ("Días laborables", "dias_laborables"),
                 ("Días trabajados", "dias_trabajados"),
                 ("Vacaciones (días)", "dias_vacaciones"),
@@ -1052,6 +1147,7 @@ if "abs_results" in SS:
                 {
                     "centro": k["centro"],
                     "plantilla": k["plantilla"],
+                    "plantilla_efectiva": k["plantilla_efectiva"],
                     "dias_laborables": k["dias_laborables"],
                     "dias_trabajados": k["dias_trabajados"],
                     "dias_vacaciones": k["dias_vacaciones"],
