@@ -75,6 +75,7 @@ def get_default_holidays(year):
 # 2. CUSTOM CALENDAR — persistent JSON
 # =============================================================================
 CALENDAR_FILE = Path(__file__).resolve().parent.parent / "data" / "calendario_laboral.json"
+EMPLOYEES_FILE = Path(__file__).resolve().parent.parent / "data" / "plantilla_empleados.json"
 
 
 def load_custom_calendar():
@@ -151,6 +152,61 @@ def parse_calendar_upload(data_bytes):
     return result
 
 
+# =============================================================================
+# 3. EMPLOYEE LIST — optional override (persistent JSON)
+# =============================================================================
+def load_employee_list():
+    """Load saved employee list: {centro_name: [name1, name2, ...]}"""
+    if EMPLOYEES_FILE.exists():
+        with open(EMPLOYEES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def save_employee_list(data):
+    EMPLOYEES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(EMPLOYEES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def generate_employee_template():
+    """Generate an Excel template for employee lists per center."""
+    df = pd.DataFrame({
+        "Centro": ["ejemplo_centro1", "ejemplo_centro1", "ejemplo_centro2"],
+        "Empleado": ["GARCIA LOPEZ, JUAN", "MARTINEZ RUIZ, ANA", "PEREZ GIL, CARLOS"],
+    })
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Empleados")
+        wb = writer.book
+        ws = writer.sheets["Empleados"]
+        hdr_f = wb.add_format({"bold": True, "bg_color": "#1F3864", "font_color": "white", "border": 1})
+        normal_f = wb.add_format({"border": 1})
+        for ci, cn in enumerate(df.columns):
+            ws.write(0, ci, cn, hdr_f)
+        for ri in range(len(df)):
+            for ci in range(len(df.columns)):
+                ws.write(ri + 1, ci, df.iloc[ri, ci], normal_f)
+        ws.set_column(0, 0, 25)
+        ws.set_column(1, 1, 35)
+        ws.freeze_panes(1, 0)
+    return buf.getvalue()
+
+
+def parse_employee_upload(data_bytes):
+    """Parse uploaded employee Excel → {centro: [name1, name2, ...]}"""
+    df = pd.read_excel(BytesIO(data_bytes), sheet_name=0)
+    if len(df.columns) < 2:
+        return None
+    result = {}
+    for _, row in df.iterrows():
+        centro = str(row.iloc[0]).strip()
+        nombre = str(row.iloc[1]).strip()
+        if centro and nombre and centro.lower() != "nan" and nombre.lower() != "nan":
+            result.setdefault(centro, []).append(nombre.upper())
+    return result if result else None
+
+
 def get_non_working_days(year, month, custom_cal=None):
     """Return set of day numbers (1-31) that are non-working in this month."""
     non_working = set()
@@ -215,14 +271,12 @@ def _is_title_row(name):
     low = name.lower().strip()
     if low in SKIP_NAMES:
         return True
-    # Pure numbers or dates
-    if name.replace(".", "").replace(",", "").replace("-", "").replace("/", "").replace(" ", "").isdigit():
+    # Employee names always start with a letter (A-Z, Ñ, Á, etc.)
+    # This catches ∑, Σ, symbols, numbers, and any other non-name row
+    if name and not name[0].isalpha():
         return True
-    # Matches known title patterns
+    # Matches known title patterns (months, departments, etc.)
     if _TITLE_PATTERNS.search(low):
-        return True
-    # Very short text that's all uppercase (likely a section header like "TURNO A")
-    if len(name) <= 3 and name == name.upper() and not name.isalpha():
         return True
     return False
 
@@ -336,6 +390,10 @@ def parse_cuadrante(data_bytes, filename="", non_working_days=None):
             row_data = df_raw.iloc[ri, min_day_col:max(day_cols.values()) + 1]
             if row_data.isna().all() or (row_data.astype(str).str.strip() == "").all():
                 continue
+            # Check if unnamed row looks like a summary (values > 1 suggest sums, not daily entries)
+            numeric_vals = pd.to_numeric(row_data, errors="coerce").dropna()
+            if len(numeric_vals) > 0 and (numeric_vals > 1).sum() > len(numeric_vals) * 0.5:
+                continue  # likely a sum/total row
             name_val = f"Empleado fila {ri + 1}"
 
         name = str(name_val).strip()
@@ -505,6 +563,41 @@ if custom_cal and st.sidebar.button("Borrar calendario personalizado", type="sec
     custom_cal = None
     st.rerun()
 
+# --- Employee list (optional override) ---
+st.sidebar.divider()
+st.sidebar.subheader("Plantilla de empleados")
+st.sidebar.caption("Opcional: sube una lista con los empleados reales de cada centro para evitar que se cuenten filas de resumen o títulos.")
+
+employee_override = load_employee_list()
+if employee_override:
+    total_emp = sum(len(v) for v in employee_override.values())
+    st.sidebar.success(f"Lista cargada: {total_emp} empleados en {len(employee_override)} centro(s)")
+
+st.sidebar.download_button(
+    "Descargar plantilla empleados",
+    generate_employee_template(),
+    file_name="plantilla_empleados.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
+)
+
+emp_upload = st.sidebar.file_uploader("Subir plantilla cumplimentada", type=["xlsx", "xls"], key="emp_up")
+if emp_upload:
+    parsed_emp = parse_employee_upload(emp_upload.getvalue())
+    if parsed_emp:
+        save_employee_list(parsed_emp)
+        employee_override = parsed_emp
+        total_emp = sum(len(v) for v in parsed_emp.values())
+        st.sidebar.success(f"Guardado: {total_emp} empleados en {len(parsed_emp)} centro(s)")
+    else:
+        st.sidebar.error("No se pudo leer la plantilla. Verifica que tenga columnas Centro y Empleado.")
+
+if employee_override and st.sidebar.button("Borrar lista de empleados", type="secondary"):
+    if EMPLOYEES_FILE.exists():
+        EMPLOYEES_FILE.unlink()
+    employee_override = None
+    st.rerun()
+
 # --- Guard ---
 if "abs_file_data" not in SS or not SS["abs_file_data"]:
     st.info("Sube los cuadrantes mensuales de horas en la barra lateral (un Excel por centro).")
@@ -553,6 +646,16 @@ if st.button("Analizar Absentismo", type="primary", use_container_width=True):
         if parsed is None:
             st.error(f"Error procesando **{fname}**: {'; '.join(w if isinstance(w, str) else w.get('mensaje', '') for w in warns)}")
             continue
+        # Filter employees by override list if available
+        if employee_override:
+            allowed = None
+            # Try exact match first, then case-insensitive partial match
+            for key in employee_override:
+                if key.upper() == centro_name.upper() or key.upper() in centro_name.upper() or centro_name.upper() in key.upper():
+                    allowed = {n.upper() for n in employee_override[key]}
+                    break
+            if allowed:
+                parsed["employees"] = [e for e in parsed["employees"] if e["nombre"].upper() in allowed]
         kpis = calculate_kpis(parsed, sel_year, sel_month, custom_cal)
         kpis["centro"] = centro_name
         all_results.append(kpis)
