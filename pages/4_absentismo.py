@@ -631,6 +631,90 @@ def save_abs_history(entries):
         json.dump(entries, f, ensure_ascii=False, indent=2)
 
 
+# Reverse mapping: month name → number
+_MONTH_NAME_TO_NUM = {v.upper(): k for k, v in MONTH_NAMES.items()}
+
+
+def parse_report_excel(data_bytes):
+    """Parse an exported absentismo Excel report back into a history entry.
+
+    Reads the 'Resumen' sheet and extracts KPIs per center.
+    Returns a history-compatible dict or None on failure.
+    """
+    try:
+        df = pd.read_excel(BytesIO(data_bytes), sheet_name="Resumen", header=None)
+    except Exception:
+        return None
+
+    # Row 0: title — extract month and year
+    title = str(df.iloc[0, 0]) if not pd.isna(df.iloc[0, 0]) else ""
+    # Pattern: "ANÁLISIS DE ABSENTISMO — MES AÑO"
+    m = re.search(r"—\s*(\w+)\s+(\d{4})", title)
+    if not m:
+        return None
+    month_name, year_str = m.group(1).upper(), m.group(2)
+    month_num = _MONTH_NAME_TO_NUM.get(month_name)
+    if not month_num:
+        return None
+    year = int(year_str)
+
+    # Row 2: headers — center names (skip col 0 which is empty, skip "TOTAL")
+    header_row = df.iloc[2]
+    centro_names = []
+    for ci in range(1, len(header_row)):
+        val = str(header_row.iloc[ci]).strip() if not pd.isna(header_row.iloc[ci]) else ""
+        if val and val.upper() != "TOTAL":
+            centro_names.append((ci, val))
+
+    if not centro_names:
+        return None
+
+    # Metric rows start at row 3, in the same order as the export
+    metric_keys = [
+        "plantilla", "plantilla_efectiva", "dias_laborables", "dias_trabajados",
+        "dias_vacaciones", "dias_baja", "dias_ap", "dias_permiso", "dias_excedencia",
+        "total_ausencias_con_vac", "total_ausencias_sin_vac",
+    ]
+
+    centros = []
+    for ci, cname in centro_names:
+        centro_data = {"centro": cname}
+        for ri, key in enumerate(metric_keys):
+            val = df.iloc[3 + ri, ci]
+            centro_data[key] = float(val) if not pd.isna(val) else 0
+        # Percentages are in rows after a blank row (row 3+11=14 is blank, 15 and 16)
+        pct_row_con = 3 + len(metric_keys) + 1  # skip blank row
+        pct_row_sin = pct_row_con + 1
+        pct_con_val = df.iloc[pct_row_con, ci] if pct_row_con < len(df) else 0
+        pct_sin_val = df.iloc[pct_row_sin, ci] if pct_row_sin < len(df) else 0
+        # Values may be decimal (0.0523) or percentage (5.23)
+        pct_con_v = float(pct_con_val) if not pd.isna(pct_con_val) else 0
+        pct_sin_v = float(pct_sin_val) if not pd.isna(pct_sin_val) else 0
+        # If stored as decimal fraction (< 1), convert to percentage
+        if pct_con_v < 1:
+            pct_con_v = round(pct_con_v * 100, 2)
+        if pct_sin_v < 1:
+            pct_sin_v = round(pct_sin_v * 100, 2)
+        centro_data["pct_con"] = pct_con_v
+        centro_data["pct_sin"] = pct_sin_v
+        centros.append(centro_data)
+
+    total_plantilla = sum(c["plantilla"] for c in centros)
+    total_dias_teo = sum(c["plantilla"] * c["dias_laborables"] for c in centros)
+    total_aus_con = sum(c["total_ausencias_con_vac"] for c in centros)
+    total_aus_sin = sum(c["total_ausencias_sin_vac"] for c in centros)
+
+    return {
+        "key": f"{year}-{month_num:02d}",
+        "year": year,
+        "month": month_num,
+        "centros": centros,
+        "total_pct_con": round(total_aus_con / total_dias_teo * 100, 2) if total_dias_teo > 0 else 0,
+        "total_pct_sin": round(total_aus_sin / total_dias_teo * 100, 2) if total_dias_teo > 0 else 0,
+        "total_plantilla": total_plantilla,
+    }
+
+
 # =============================================================================
 # 7. SIDEBAR — FILES + CALENDAR
 # =============================================================================
@@ -1273,11 +1357,49 @@ else:
             )
             st.plotly_chart(fig2, use_container_width=True)
 
-    # Clear history
+    # --- Manage history ---
     with st.expander("Gestionar historial"):
+        # Upload a past report Excel
+        st.markdown("**Subir reporte pasado**")
+        st.caption("Sube un Excel de reporte de absentismo (generado por esta app) para añadirlo al historial.")
+        hist_upload = st.file_uploader(
+            "Excel de reporte", type=["xlsx", "xls"], key="hist_report_upload",
+        )
+        if hist_upload:
+            parsed_entry = parse_report_excel(hist_upload.getvalue())
+            if parsed_entry:
+                month_label = f"{MONTH_NAMES[parsed_entry['month']]} {parsed_entry['year']}"
+                st.success(f"Detectado: **{month_label}** — {len(parsed_entry['centros'])} centro(s)")
+                if st.button(f"Guardar {month_label} en historial", type="primary"):
+                    hist_current = load_abs_history()
+                    hist_current = [h for h in hist_current if h.get("key") != parsed_entry["key"]]
+                    hist_current.append(parsed_entry)
+                    hist_current.sort(key=lambda h: h["key"])
+                    save_abs_history(hist_current)
+                    st.success(f"**{month_label}** guardado en historial")
+                    st.rerun()
+            else:
+                st.error("No se pudo leer el reporte. Asegúrate de que tiene la hoja 'Resumen' con el formato correcto.")
+
+        # Individual month deletion
+        st.divider()
+        st.markdown("**Eliminar meses individuales**")
         for h in hist:
-            st.text(f"{MONTH_NAMES[h['month']]} {h['year']} — Plantilla: {h['total_plantilla']} — "
-                    f"Abs. con vac: {h['total_pct_con']:.2f}% — sin vac: {h['total_pct_sin']:.2f}%")
+            col_info, col_btn = st.columns([4, 1])
+            with col_info:
+                st.text(
+                    f"{MONTH_NAMES[h['month']]} {h['year']} — "
+                    f"Plantilla: {h['total_plantilla']} — "
+                    f"Con vac: {h['total_pct_con']:.2f}% — Sin vac: {h['total_pct_sin']:.2f}%"
+                )
+            with col_btn:
+                if st.button("Eliminar", key=f"del_hist_{h['key']}", type="secondary"):
+                    hist_current = load_abs_history()
+                    hist_current = [x for x in hist_current if x.get("key") != h["key"]]
+                    save_abs_history(hist_current)
+                    st.rerun()
+
+        st.divider()
         if st.button("Limpiar todo el historial", type="secondary"):
             save_abs_history([])
             st.rerun()
