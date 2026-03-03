@@ -673,14 +673,6 @@ st.caption(
     + (f" · Festivos: {', '.join(f'{d.day}-{n}' for d, n in sorted(month_holidays.items()))}" if month_holidays and not custom_cal else "")
 )
 
-# --- Merge option ---
-if len(SS.get("abs_file_data", [])) > 1:
-    st.checkbox(
-        "Fusionar centros (tratar como un solo almacén y eliminar empleados repetidos)",
-        key="abs_merge_centers",
-    )
-
-
 # =============================================================================
 # 9. PROCESS
 # =============================================================================
@@ -714,16 +706,6 @@ if st.button("Analizar Absentismo", type="primary", use_container_width=True):
     if all_results:
         # Detect duplicates across centers
         duplicates = detect_duplicates(all_employee_details)
-
-        # Merge centers if requested
-        if SS.get("abs_merge_centers", False) and len(all_results) > 1:
-            merged_name = " + ".join(k["centro"] for k in all_results)
-            merged_employees = merge_employee_records(all_employee_details)
-            merged_parsed = {"employees": merged_employees}
-            merged_kpis = calculate_kpis(merged_parsed, sel_year, sel_month, custom_cal)
-            merged_kpis["centro"] = merged_name
-            all_results = [merged_kpis]
-            all_employee_details = {merged_name: merged_employees}
 
         SS["abs_results"] = {
             "kpis": all_results,
@@ -769,21 +751,32 @@ if "abs_results" in SS:
     m3.metric("Absentismo (con vac.)", f"{pct_con:.2f}%")
     m4.metric("Absentismo (sin vac.)", f"{pct_sin:.2f}%")
 
-    # --- Duplicate detection ---
+    # --- Duplicate detection & interactive merge ---
     duplicates = res.get("duplicates", {})
-    if duplicates:
+    merged_info = res.get("merged_centers", [])
+
+    # Show success message if merge was just applied
+    if merged_info:
+        removed_names = res.get("merged_duplicates_removed", [])
         st.divider()
-        merge_active = any("+" in k.get("centro", "") for k in kpis_list)
-        if merge_active:
-            st.success(
-                f"**Centros fusionados** — Se eliminaron **{len(duplicates)} empleado(s) repetido(s)** "
-                f"de la plantilla combinada."
-            )
-        else:
-            st.warning(
-                f"**{len(duplicates)} empleado(s) repetido(s)** detectados en varios centros. "
-                f"Activa 'Fusionar centros' arriba para combinarlos en un solo análisis."
-            )
+        st.success(
+            f"**Centros fusionados**: {', '.join(merged_info)} — "
+            f"Se eliminaron **{len(removed_names)} empleado(s) repetido(s)**."
+        )
+        if removed_names:
+            with st.expander("Empleados deduplicados"):
+                for norm_name in removed_names:
+                    orig_dups = res.get("original_duplicates", {})
+                    if norm_name in orig_dups:
+                        display = orig_dups[norm_name][0][1]["nombre"]
+                    else:
+                        display = norm_name
+                    st.markdown(f"- {display}")
+
+    # Show duplicates and merge UI (only when there are 2+ separate centers)
+    if duplicates and len(kpis_list) > 1:
+        st.divider()
+        st.warning(f"**{len(duplicates)} empleado(s) repetido(s)** detectados en varios centros")
         with st.expander(f"Ver empleados repetidos ({len(duplicates)})", expanded=True):
             dup_rows = []
             for name, entries in sorted(duplicates.items()):
@@ -794,6 +787,61 @@ if "abs_results" in SS:
                     "Nº centros": len(centros_list),
                 })
             st.dataframe(pd.DataFrame(dup_rows), use_container_width=True, hide_index=True)
+
+        # --- Merge UI ---
+        st.subheader("Fusionar centros")
+        st.caption("Selecciona los centros que comparten plantilla para unificarlos y eliminar repetidos.")
+        available_centers = [k["centro"] for k in kpis_list]
+        selected_to_merge = st.multiselect(
+            "Centros a fusionar:",
+            available_centers,
+            key="abs_merge_selection",
+        )
+
+        if len(selected_to_merge) >= 2:
+            # Preview which duplicates would be removed
+            merge_dups = {}
+            for name, entries in duplicates.items():
+                relevant_centers = set(c for c, _ in entries if c in selected_to_merge)
+                if len(relevant_centers) > 1:
+                    merge_dups[name] = [(c, e) for c, e in entries if c in selected_to_merge]
+
+            if merge_dups:
+                dup_names = ", ".join(e[0][1]["nombre"] for e in merge_dups.values())
+                st.info(f"Se eliminarán **{len(merge_dups)} repetido(s)**: {dup_names}")
+            else:
+                st.info("No hay empleados repetidos entre los centros seleccionados.")
+
+            if st.button("Fusionar seleccionados", type="primary", use_container_width=True):
+                merged_name = " + ".join(selected_to_merge)
+                merge_emp_details = {c: all_employees[c] for c in selected_to_merge if c in all_employees}
+                merged_employees = merge_employee_records(merge_emp_details)
+                merged_parsed = {"employees": merged_employees}
+                merged_kpis = calculate_kpis(merged_parsed, r_year, r_month, custom_cal)
+                merged_kpis["centro"] = merged_name
+
+                new_kpis = [k for k in kpis_list if k["centro"] not in selected_to_merge] + [merged_kpis]
+                new_employees = {c: emps for c, emps in all_employees.items() if c not in selected_to_merge}
+                new_employees[merged_name] = merged_employees
+
+                # Recalculate duplicates for new configuration
+                new_duplicates = detect_duplicates(new_employees)
+
+                SS["abs_results"] = {
+                    "kpis": new_kpis,
+                    "warnings": res["warnings"],
+                    "employees": new_employees,
+                    "month": r_month,
+                    "year": r_year,
+                    "duplicates": new_duplicates,
+                    "original_duplicates": duplicates,
+                    "merged_centers": selected_to_merge,
+                    "merged_duplicates_removed": list(merge_dups.keys()),
+                }
+                st.rerun()
+
+        elif len(selected_to_merge) == 1:
+            st.caption("Selecciona al menos 2 centros para fusionar.")
 
     # --- Tabs ---
     if len(kpis_list) > 1:
