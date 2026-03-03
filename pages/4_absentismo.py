@@ -193,8 +193,38 @@ SKIP_NAMES = {
     "nan", "", "total", "totales", "suma", "nombre", "empleado", "trabajador",
     "departamento", "centro", "mes", "año", "seccion", "sección", "turno",
     "puesto", "categoria", "categoría", "observaciones", "notas", "dias",
-    "horas", "plantilla",
+    "horas", "plantilla", "resumen", "cuadrante", "horario", "calendario",
+    "jornada", "personal", "media", "promedio", "acumulado", "periodo",
+    "fecha", "firma", "responsable", "supervisor", "encargado", "gerente",
+    "director", "jefe", "coordinador", "subtotal", "nº", "num",
 }
+
+# Patterns that indicate a title/section row rather than an employee name
+_TITLE_PATTERNS = re.compile(
+    r"(?i)^(enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+    r"septiembre|octubre|noviembre|diciembre|"
+    r"cuadrante|horario|turno|secci[oó]n|departamento|"
+    r"centro|almac[eé]n|planta|nave|total\b|"
+    r"20\d{2}|horas\s|d[ií]as\s|plantilla\b|"
+    r"observ|notas?$|resumen|periodo)"
+)
+
+
+def _is_title_row(name):
+    """Detect if a row name is likely a title/section header, not an employee."""
+    low = name.lower().strip()
+    if low in SKIP_NAMES:
+        return True
+    # Pure numbers or dates
+    if name.replace(".", "").replace(",", "").replace("-", "").replace("/", "").replace(" ", "").isdigit():
+        return True
+    # Matches known title patterns
+    if _TITLE_PATTERNS.search(low):
+        return True
+    # Very short text that's all uppercase (likely a section header like "TURNO A")
+    if len(name) <= 3 and name == name.upper() and not name.isalpha():
+        return True
+    return False
 
 
 def classify_cell(val):
@@ -299,7 +329,6 @@ def parse_cuadrante(data_bytes, filename="", non_working_days=None):
     max_day = max(day_cols.keys())
     employees = []
     unknown_codes = set()
-    empty_cells = []
 
     for ri in range(day_row_idx + 1, len(df_raw)):
         name_val = df_raw.iloc[ri, name_col]
@@ -310,11 +339,8 @@ def parse_cuadrante(data_bytes, filename="", non_working_days=None):
             name_val = f"Empleado fila {ri + 1}"
 
         name = str(name_val).strip()
-        # Skip header/title rows
-        if name.lower() in SKIP_NAMES:
-            continue
-        # Skip if name looks like a date or number only
-        if name.replace(".", "").replace(",", "").replace("-", "").replace("/", "").isdigit():
+        # Skip header/title/section rows
+        if _is_title_row(name):
             continue
 
         emp = {
@@ -336,14 +362,8 @@ def parse_cuadrante(data_bytes, filename="", non_working_days=None):
             elif cat in ABSENCE_CODES:
                 emp[cat] += 1
             elif cat == "empty":
-                # Only flag if it's a working day
                 if day_num not in nw:
                     emp["empty"] += 1
-                    empty_cells.append({
-                        "empleado": name, "dia": day_num,
-                        "fila": ri + 1, "columna": col_idx + 1,
-                    })
-                # else: weekend/holiday → ignore silently
             elif cat.startswith("unknown:"):
                 emp["unknown"] += 1
                 code = cat.split(":", 1)[1]
@@ -358,12 +378,6 @@ def parse_cuadrante(data_bytes, filename="", non_working_days=None):
     if not employees:
         return None, [f"No se encontraron empleados en '{filename}'"]
 
-    if empty_cells:
-        warnings.append({
-            "tipo": "Celdas vacías",
-            "mensaje": f"{len(empty_cells)} celda(s) vacía(s) en días laborables",
-            "detalle": empty_cells,
-        })
     if unknown_codes:
         warnings.append({
             "tipo": "Códigos desconocidos",
@@ -566,13 +580,11 @@ if "abs_results" in SS:
     r_month = res["month"]
     r_year = res["year"]
 
-    # --- Warnings (only unknown codes in UI — empty cells just count) ---
+    # --- Warnings (only unknown codes) ---
     for centro, warns in all_warnings.items():
         for w in warns:
             if w["tipo"] == "Códigos desconocidos":
                 st.error(f"**{centro}**: {w['mensaje']}")
-            elif w["tipo"] == "Celdas vacías":
-                st.warning(f"**{centro}**: {w['mensaje']}")
 
     # --- KPI Cards ---
     st.header(f"Resumen — {MONTH_NAMES[r_month]} {r_year}")
