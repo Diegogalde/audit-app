@@ -215,6 +215,9 @@ def _is_title_row(name):
     low = name.lower().strip()
     if low in SKIP_NAMES:
         return True
+    # Summary rows with ∑ / Σ symbol (e.g. "∑ dia", "∑ sem.", "∑ mes")
+    if "∑" in name or "Σ" in name:
+        return True
     # Pure numbers or dates
     if name.replace(".", "").replace(",", "").replace("-", "").replace("/", "").replace(" ", "").isdigit():
         return True
@@ -336,6 +339,10 @@ def parse_cuadrante(data_bytes, filename="", non_working_days=None):
             row_data = df_raw.iloc[ri, min_day_col:max(day_cols.values()) + 1]
             if row_data.isna().all() or (row_data.astype(str).str.strip() == "").all():
                 continue
+            # Check if unnamed row looks like a summary (values > 1 suggest sums, not daily entries)
+            numeric_vals = pd.to_numeric(row_data, errors="coerce").dropna()
+            if len(numeric_vals) > 0 and (numeric_vals > 1).sum() > len(numeric_vals) * 0.5:
+                continue  # likely a sum/total row
             name_val = f"Empleado fila {ri + 1}"
 
         name = str(name_val).strip()
