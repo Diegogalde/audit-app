@@ -593,6 +593,14 @@ if "abs_results" in SS:
             if w["tipo"] == "Códigos desconocidos":
                 st.error(f"**{centro}**: {w['mensaje']}")
 
+    # --- Debug: show detected employees per center ---
+    with st.expander("🔍 Debug: Empleados detectados por centro (verifica conteo)"):
+        for centro, emps in all_employees.items():
+            names = [e["nombre"] for e in emps]
+            st.write(f"**{centro}** — {len(names)} empleados:")
+            for i, n in enumerate(names, 1):
+                st.text(f"  {i}. {repr(n)}")
+
     # --- KPI Cards ---
     st.header(f"Resumen — {MONTH_NAMES[r_month]} {r_year}")
 
