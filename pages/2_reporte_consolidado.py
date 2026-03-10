@@ -194,32 +194,31 @@ def process_sheet(df, is_control=False, df_values_ext=None):
                 df["_mat_k"] = df[col_mat].astype(str).str.strip() if col_mat else ""
                 df["_lote_k"] = df[col_lote].astype(str).str.strip() if col_lote else ""
                 # 3-level cascade: mat+lote → lote → mat
+                # Use map-based approach to avoid index alignment issues
                 if ext_mat and ext_lote and col_lote:
                     vd1 = vdf.drop_duplicates(subset=["_ext_mat", "_ext_lote"], keep="first")
-                    m1 = df.loc[need_fill].merge(
-                        vd1[["_ext_mat", "_ext_lote", "_ext_val"]],
-                        left_on=["_mat_k", "_lote_k"], right_on=["_ext_mat", "_ext_lote"], how="left"
-                    )
-                    filled = m1["_ext_val"].notna()
-                    df.loc[need_fill & filled.values, "_valor_unit"] = m1.loc[filled, "_ext_val"].values
+                    lookup1 = dict(zip(
+                        vd1["_ext_mat"] + "||" + vd1["_ext_lote"],
+                        vd1["_ext_val"]
+                    ))
+                    keys1 = df["_mat_k"] + "||" + df["_lote_k"]
+                    mapped1 = keys1.map(lookup1)
+                    fill_mask1 = need_fill & mapped1.notna()
+                    df.loc[fill_mask1, "_valor_unit"] = mapped1[fill_mask1]
                     need_fill = (df["_valor_unit"] == 0) | df["_valor_unit"].isna()
                 if ext_lote and col_lote and need_fill.any():
                     vd2 = vdf.drop_duplicates(subset=["_ext_lote"], keep="first")
-                    m2 = df.loc[need_fill].merge(
-                        vd2[["_ext_lote", "_ext_val"]],
-                        left_on="_lote_k", right_on="_ext_lote", how="left"
-                    )
-                    filled = m2["_ext_val"].notna()
-                    df.loc[need_fill & filled.values, "_valor_unit"] = m2.loc[filled, "_ext_val"].values
+                    lookup2 = dict(zip(vd2["_ext_lote"], vd2["_ext_val"]))
+                    mapped2 = df["_lote_k"].map(lookup2)
+                    fill_mask2 = need_fill & mapped2.notna()
+                    df.loc[fill_mask2, "_valor_unit"] = mapped2[fill_mask2]
                     need_fill = (df["_valor_unit"] == 0) | df["_valor_unit"].isna()
                 if ext_mat and need_fill.any():
                     vd3 = vdf.drop_duplicates(subset=["_ext_mat"], keep="first")
-                    m3 = df.loc[need_fill].merge(
-                        vd3[["_ext_mat", "_ext_val"]],
-                        left_on="_mat_k", right_on="_ext_mat", how="left"
-                    )
-                    filled = m3["_ext_val"].notna()
-                    df.loc[need_fill & filled.values, "_valor_unit"] = m3.loc[filled, "_ext_val"].values
+                    lookup3 = dict(zip(vd3["_ext_mat"], vd3["_ext_val"]))
+                    mapped3 = df["_mat_k"].map(lookup3)
+                    fill_mask3 = need_fill & mapped3.notna()
+                    df.loc[fill_mask3, "_valor_unit"] = mapped3[fill_mask3]
                 df.drop(columns=["_mat_k", "_lote_k"], errors="ignore", inplace=True)
 
     df["_is_error"] = False
