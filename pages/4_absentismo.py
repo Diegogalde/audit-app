@@ -469,8 +469,11 @@ def classify_cell(val):
     if s == "":
         return "empty", True
     try:
-        float(s.replace(",", "."))
-        return "worked", False
+        num = float(s.replace(",", "."))
+        if num > 0:
+            return "worked", False
+        # 0 hours = registered but not working (e.g., listed in center but works elsewhere)
+        return "zero", False
     except ValueError:
         pass
     upper = s.upper()
@@ -598,6 +601,8 @@ def parse_cuadrante(data_bytes, filename="", non_working_days=None):
 
             if cat == "worked":
                 emp["worked"] += 1
+            elif cat == "zero":
+                pass  # 0 hours: registered but not working — don't count
             elif cat in ABSENCE_CODES:
                 emp[cat] += 1
             elif cat == "empty":
