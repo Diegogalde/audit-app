@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import json
 from io import BytesIO
+from pathlib import Path
 from datetime import date
 
 st.title("Generar Reporte Consolidado")
@@ -24,23 +26,68 @@ def find_col(columns, candidates):
 
 
 # =============================================================================
-# 1. FILE UPLOADS — persisted in session_state
+# PERSISTENT STORAGE
+# =============================================================================
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+CENTROS_FILE = _DATA_DIR / "centros_trabajo.json"
+CONSOL_HISTORY_FILE = _DATA_DIR / "consolidado_historico.json"
+
+
+def load_centros_trabajo():
+    if CENTROS_FILE.exists():
+        with open(CENTROS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def load_consol_history():
+    if CONSOL_HISTORY_FILE.exists():
+        with open(CONSOL_HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def save_consol_history(entries):
+    CONSOL_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONSOL_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(entries, f, ensure_ascii=False, indent=2)
+
+
+# =============================================================================
+# 1. CENTER SELECTOR + FILE UPLOADS — persisted in session_state
 # =============================================================================
 SS = st.session_state
+
+centros = load_centros_trabajo()
+if centros:
+    centro_sel = st.selectbox(
+        "Centro de trabajo",
+        options=centros,
+        key="rpt_centro",
+        help="Selecciona el centro al que corresponde esta auditoría",
+    )
+else:
+    st.info("No hay centros registrados. Regístralos en la pestaña de Absentismo.")
+    centro_sel = None
 
 st.sidebar.header("Archivos — Reporte")
 audit_up = st.sidebar.file_uploader("Excel de auditoría rellenado", type=["xlsx", "xls"], key="rpt_audit_up")
 stock_up = st.sidebar.file_uploader("Stock original (opcional, para % cobertura)", type=["xlsx", "xls"], key="rpt_stock_up")
+values_up = st.sidebar.file_uploader("Excel de Valores Unitarios (opcional, para pérdidas)", type=["xlsx", "xls"], key="rpt_values_up")
 
 if audit_up is not None:
     SS["rpt_audit_bytes"] = audit_up.getvalue()
 if stock_up is not None:
     SS["rpt_stock_bytes"] = stock_up.getvalue()
+if values_up is not None:
+    SS["rpt_values_bytes"] = values_up.getvalue()
 
 if "rpt_audit_bytes" in SS:
     st.sidebar.success("Auditoría cargada")
 if "rpt_stock_bytes" in SS:
     st.sidebar.success("Stock original cargado")
+if "rpt_values_bytes" in SS:
+    st.sidebar.success("Valores cargados")
 
 if "rpt_audit_bytes" not in SS:
     st.info("Sube el Excel de auditoría rellenado en la barra lateral.")
@@ -71,6 +118,13 @@ df_stock_orig = None
 if "rpt_stock_bytes" in SS:
     df_stock_orig = load_excel_bytes(SS["rpt_stock_bytes"])
 
+# External values file (for loss calculation when audit Excel doesn't have unit values)
+df_values_ext = None
+if "rpt_values_bytes" in SS:
+    _xls_v = pd.ExcelFile(BytesIO(SS["rpt_values_bytes"]))
+    _frames_v = [pd.read_excel(_xls_v, sheet_name=s) for s in _xls_v.sheet_names]
+    df_values_ext = pd.concat(_frames_v, ignore_index=True)
+
 
 # =============================================================================
 # 3. CLASSIFY
@@ -100,7 +154,7 @@ if not sheet_map:
 # =============================================================================
 # 4. PROCESS
 # =============================================================================
-def process_sheet(df, is_control=False):
+def process_sheet(df, is_control=False, df_values_ext=None):
     col_ubic = find_col(df.columns, ["Ubicacion", "Ubicación"])
     col_stock = find_col(df.columns, ["Stock", "Cantidad"])
     col_fisica = find_col(df.columns, ["Cant. Física", "Cant. Fisica"])
@@ -120,10 +174,61 @@ def process_sheet(df, is_control=False):
     df["_valor_total"] = pd.to_numeric(df[col_valor_total], errors="coerce").fillna(0) if col_valor_total else 0
     df["_valor_unit"] = pd.to_numeric(df[col_valor_unit], errors="coerce").fillna(0) if col_valor_unit else 0
 
+    # Enrich unit values from external values file if available
+    if df_values_ext is not None:
+        col_mat = find_col(df.columns, ["Ref. Material", "Material"])
+        col_lote = find_col(df.columns, ["Nº Lote", "Lote"])
+        ext_mat = find_col(df_values_ext.columns, ["Material", "Ref. Material", "Referencia"])
+        ext_lote = find_col(df_values_ext.columns, ["Batch", "Lote", "Nº Lote"])
+        ext_valor = find_col(df_values_ext.columns, ["Valor unitario", "Valor Unitario", "Unit Value", "Precio"])
+        if ext_valor and col_mat:
+            need_fill = (df["_valor_unit"] == 0) | df["_valor_unit"].isna()
+            if need_fill.any():
+                vdf = df_values_ext.copy()
+                vdf["_ext_val"] = pd.to_numeric(vdf[ext_valor], errors="coerce")
+                vdf = vdf.dropna(subset=["_ext_val"])
+                if ext_mat:
+                    vdf["_ext_mat"] = vdf[ext_mat].astype(str).str.strip()
+                if ext_lote:
+                    vdf["_ext_lote"] = vdf[ext_lote].astype(str).str.strip()
+                df["_mat_k"] = df[col_mat].astype(str).str.strip() if col_mat else ""
+                df["_lote_k"] = df[col_lote].astype(str).str.strip() if col_lote else ""
+                # 3-level cascade: mat+lote → lote → mat
+                if ext_mat and ext_lote and col_lote:
+                    vd1 = vdf.drop_duplicates(subset=["_ext_mat", "_ext_lote"], keep="first")
+                    m1 = df.loc[need_fill].merge(
+                        vd1[["_ext_mat", "_ext_lote", "_ext_val"]],
+                        left_on=["_mat_k", "_lote_k"], right_on=["_ext_mat", "_ext_lote"], how="left"
+                    )
+                    filled = m1["_ext_val"].notna()
+                    df.loc[need_fill & filled.values, "_valor_unit"] = m1.loc[filled, "_ext_val"].values
+                    need_fill = (df["_valor_unit"] == 0) | df["_valor_unit"].isna()
+                if ext_lote and col_lote and need_fill.any():
+                    vd2 = vdf.drop_duplicates(subset=["_ext_lote"], keep="first")
+                    m2 = df.loc[need_fill].merge(
+                        vd2[["_ext_lote", "_ext_val"]],
+                        left_on="_lote_k", right_on="_ext_lote", how="left"
+                    )
+                    filled = m2["_ext_val"].notna()
+                    df.loc[need_fill & filled.values, "_valor_unit"] = m2.loc[filled, "_ext_val"].values
+                    need_fill = (df["_valor_unit"] == 0) | df["_valor_unit"].isna()
+                if ext_mat and need_fill.any():
+                    vd3 = vdf.drop_duplicates(subset=["_ext_mat"], keep="first")
+                    m3 = df.loc[need_fill].merge(
+                        vd3[["_ext_mat", "_ext_val"]],
+                        left_on="_mat_k", right_on="_ext_mat", how="left"
+                    )
+                    filled = m3["_ext_val"].notna()
+                    df.loc[need_fill & filled.values, "_valor_unit"] = m3.loc[filled, "_ext_val"].values
+                df.drop(columns=["_mat_k", "_lote_k"], errors="ignore", inplace=True)
+
     df["_is_error"] = False
     mask_filled = df["_fisica"].notna()
     if mask_filled.any():
         df.loc[mask_filled, "_is_error"] = df.loc[mask_filled, "_stock"] != df.loc[mask_filled, "_fisica"]
+
+    # Erroneous units: absolute discrepancy for lines with error
+    df["_uds_erroneas"] = np.where(mask_filled & df["_is_error"], (df["_fisica"] - df["_stock"]).abs(), 0)
 
     # Units: stock vs physical (only where physical is filled)
     df["_uds_inventariadas"] = np.where(mask_filled, df["_fisica"], np.nan)
@@ -158,6 +263,7 @@ def process_sheet(df, is_control=False):
         "valor_total": ("_valor_total", "sum"),
         "uds_inventariadas": ("_uds_inventariadas", lambda x: x.dropna().sum()),
         "uds_stock": ("_uds_stock", lambda x: x.dropna().sum()),
+        "uds_erroneas": ("_uds_erroneas", "sum"),
         "uds_descuadre_abs": ("_descuadre", lambda x: x.dropna().abs().sum()),
         "perdida_monetaria": ("_perdida_monetaria", "sum"),
         "obs_inventario": ("_obs_inv", lambda x: "; ".join(dict.fromkeys(o.strip() for o in x if o and o != "nan" and o.strip()))),
@@ -188,6 +294,7 @@ def process_sheet(df, is_control=False):
     t_lproc = int(grouped["lotes_rev_proceso"].sum()) if is_control and "lotes_rev_proceso" in grouped.columns else 0
 
     t_uds_inv = float(grouped["uds_inventariadas"].sum())
+    t_uds_err = float(grouped["uds_erroneas"].sum())
     t_uds_desc = float(grouped["uds_descuadre_abs"].sum())
     t_perdida = float(grouped["perdida_monetaria"].sum())
 
@@ -202,6 +309,7 @@ def process_sheet(df, is_control=False):
         "lotes_proceso": t_lproc,
         "cumplimiento_proceso": 1 - (t_fproc / t_lproc) if t_lproc > 0 else 1.0,
         "uds_inventariadas": t_uds_inv,
+        "uds_erroneas": t_uds_err,
         "uds_descuadre": t_uds_desc,
         "fiabilidad_uds": 1 - (t_uds_desc / t_uds_inv) if t_uds_inv > 0 else 1.0,
         "perdida_monetaria": t_perdida,
@@ -277,7 +385,7 @@ def validate_sheet(df, stype):
     return warnings
 
 
-def extract_loss_detail(df, stype):
+def extract_loss_detail(df, stype, df_values_ext=None):
     """Extract lines with negative discrepancy (physical < stock) and their monetary loss."""
     col_ubic = find_col(df.columns, ["Ubicacion", "Ubicación"])
     col_mat = find_col(df.columns, ["Ref. Material", "Material"])
@@ -290,6 +398,18 @@ def extract_loss_detail(df, stype):
     if not col_ubic or not col_stock or not col_fisica:
         return []
 
+    # Build external value lookup if available
+    _ext_lookup = {}
+    if df_values_ext is not None:
+        ext_mat = find_col(df_values_ext.columns, ["Material", "Ref. Material", "Referencia"])
+        ext_valor = find_col(df_values_ext.columns, ["Valor unitario", "Valor Unitario", "Unit Value", "Precio"])
+        if ext_mat and ext_valor:
+            for _, vr in df_values_ext.iterrows():
+                mk = str(vr[ext_mat]).strip()
+                vv = pd.to_numeric(vr[ext_valor], errors="coerce")
+                if not pd.isna(vv) and mk not in _ext_lookup:
+                    _ext_lookup[mk] = vv
+
     losses = []
     for _, row in df.iterrows():
         fis = pd.to_numeric(row[col_fisica], errors="coerce") if col_fisica else np.nan
@@ -299,6 +419,10 @@ def extract_loss_detail(df, stype):
         if fis < stk:
             uds_perdidas = stk - fis
             val_unit = pd.to_numeric(row[col_valor_unit], errors="coerce") if col_valor_unit else np.nan
+            # Fallback to external values
+            if pd.isna(val_unit) and col_mat and _ext_lookup:
+                mk = str(row[col_mat]).strip()
+                val_unit = _ext_lookup.get(mk, np.nan)
             perdida = uds_perdidas * val_unit if not pd.isna(val_unit) else np.nan
             losses.append({
                 "Sección": stype,
@@ -321,7 +445,7 @@ def extract_loss_detail(df, stype):
 results = {}
 all_stats = {}
 for stype, df in sheet_map.items():
-    kpis, stats = process_sheet(df, is_control=(stype == "CONTROL DIFERENCIADO"))
+    kpis, stats = process_sheet(df, is_control=(stype == "CONTROL DIFERENCIADO"), df_values_ext=df_values_ext)
     if kpis is not None:
         results[stype] = kpis
         all_stats[stype] = stats
@@ -330,7 +454,7 @@ all_warnings = []
 all_losses = []
 for stype, df in sheet_map.items():
     all_warnings.extend(validate_sheet(df, stype))
-    all_losses.extend(extract_loss_detail(df, stype))
+    all_losses.extend(extract_loss_detail(df, stype, df_values_ext=df_values_ext))
 
 stock_stats = {}
 if df_stock_orig is not None:
@@ -352,26 +476,29 @@ total_err = sum(s["lotes_error"] for s in all_stats.values())
 total_ubics = sum(s["ubicaciones"] for s in all_stats.values())
 total_fiab = 1 - (total_err / total_lotes) if total_lotes > 0 else 1.0
 total_uds_inv = sum(s["uds_inventariadas"] for s in all_stats.values())
+total_uds_err = sum(s["uds_erroneas"] for s in all_stats.values())
 total_uds_desc = sum(s["uds_descuadre"] for s in all_stats.values())
 total_fiab_uds = 1 - (total_uds_desc / total_uds_inv) if total_uds_inv > 0 else 1.0
 total_perdida = sum(s["perdida_monetaria"] for s in all_stats.values())
 
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Ubicaciones auditadas", total_ubics)
 m2.metric("Lotes auditados", f"{total_lotes:,}")
 m3.metric("Uds. inventariadas", f"{total_uds_inv:,.0f}")
 m4.metric("Fiabilidad por lotes", f"{total_fiab:.2%}")
-
-m5, m6, m7, m8 = st.columns(4)
-m5.metric("Lotes erróneos", total_err)
-m6.metric("Fiabilidad por uds.", f"{total_fiab_uds:.2%}",
+m5.metric("Fiabilidad por uds.", f"{total_fiab_uds:.2%}",
           help="1 − (Uds. con descuadre / Uds. inventariadas)")
+
+m6, m7, m8, m9 = st.columns(4)
+m6.metric("Lotes erróneos", total_err)
+m7.metric("Uds. erróneas", f"{total_uds_err:,.0f}",
+          help="Unidades con descuadre (valor absoluto)")
 if total_perdida > 0:
-    m7.metric("Pérdida monetaria", f"{total_perdida:,.2f} €",
+    m8.metric("Pérdida monetaria", f"{total_perdida:,.2f} €",
               help="Valor de las uds. que faltan (descuadre negativo × valor unitario)")
 else:
-    m7.metric("Pérdida monetaria", "0,00 €")
-m8.metric("", "")
+    m8.metric("Pérdida monetaria", "0,00 €")
+m9.metric("", "")
 
 if stock_stats:
     st.subheader("Cobertura vs Stock total")
@@ -418,12 +545,13 @@ for stype in section_order:
 
     st.subheader(stype)
 
-    sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+    sc1, sc2, sc3, sc4, sc5, sc6 = st.columns(6)
     sc1.metric("Ubicaciones", stats["ubicaciones"])
     sc2.metric("Lotes auditados", f"{stats['lotes_total']:,}")
     sc3.metric("Uds. inventariadas", f"{stats['uds_inventariadas']:,.0f}")
-    sc4.metric("Fiabilidad (lotes)", f"{stats['fiabilidad_global']:.2%}")
-    sc5.metric("Fiabilidad (uds.)", f"{stats['fiabilidad_uds']:.2%}")
+    sc4.metric("Uds. erróneas", f"{stats['uds_erroneas']:,.0f}")
+    sc5.metric("Fiabilidad (lotes)", f"{stats['fiabilidad_global']:.2%}")
+    sc6.metric("Fiabilidad (uds.)", f"{stats['fiabilidad_uds']:.2%}")
 
     if stats["perdida_monetaria"] > 0:
         st.warning(f"Pérdida monetaria por descuadre negativo: **{stats['perdida_monetaria']:,.2f} €**")
@@ -447,6 +575,7 @@ for stype in section_order:
     disp["Lotes erróneos"] = kpis["lotes_erroneos"]
     disp["Fiabilidad (lotes)"] = kpis["Fiabilidad"].map(lambda x: f"{x:.2%}" if x < 1 else "100%")
     disp["Uds. inventariadas"] = kpis["uds_inventariadas"].map(lambda x: f"{x:,.0f}")
+    disp["Uds. erróneas"] = kpis["uds_erroneas"].map(lambda x: f"{x:,.0f}" if x > 0 else "")
     disp["Fiabilidad (uds.)"] = kpis["Fiabilidad_uds"].map(lambda x: f"{x:.2%}" if x < 1 else "100%")
     if kpis["perdida_monetaria"].sum() > 0:
         disp["Pérdida (€)"] = kpis["perdida_monetaria"].map(lambda x: f"{x:,.2f}" if x > 0 else "")
@@ -536,7 +665,7 @@ def build_excel(results, all_stats, stock_stats, all_warnings, all_losses=None):
             f = p_ok if v >= 1.0 else (p_bad if v < 0.9 else p_w)
             ws.write_number(r, c, v, f)
 
-        widths = [24, 18, 14, 16, 14, 16, 16, 16, 50, 3, 24, 18, 22, 50]
+        widths = [24, 18, 14, 16, 14, 14, 16, 16, 16, 50, 3, 24, 18, 22, 50]
         for i, w in enumerate(widths):
             ws.set_column(i, i, w)
 
@@ -559,16 +688,18 @@ def build_excel(results, all_stats, stock_stats, all_warnings, all_losses=None):
         ws.set_row(row, 30)
         row += 2
 
+        t_uds_e = sum(s["uds_erroneas"] for s in all_stats.values())
+
         for c, h in enumerate(["", "Ubicaciones\nauditadas", "Lotes\nauditados", "Uds.\ninventariadas",
-                                "Lotes\nerróneos", "Fiabilidad\n(lotes)", "Fiabilidad\n(uds.)", "Pérdida\nmonetaria"]):
-            fmt = loss_hdr if c == 7 else hdr_f
+                                "Lotes\nerróneos", "Uds.\nerróneas", "Fiabilidad\n(lotes)", "Fiabilidad\n(uds.)", "Pérdida\nmonetaria"]):
+            fmt = loss_hdr if c == 8 else hdr_f
             ws.write(row, c, h, fmt)
         ws.set_row(row, 35)
         row += 1
         ws.write(row, 0, "TOTAL", t_lbl); ws.write(row, 1, tu, t_num); ws.write(row, 2, tl, t_num)
-        ws.write(row, 3, t_uds, t_num); ws.write(row, 4, te, t_num)
-        ws.write(row, 5, tf, t_pct); ws.write(row, 6, tf_uds, t_pct)
-        ws.write(row, 7, t_perd, loss_f if t_perd > 0 else money_f)
+        ws.write(row, 3, t_uds, t_num); ws.write(row, 4, te, t_num); ws.write(row, 5, t_uds_e, t_num)
+        ws.write(row, 6, tf, t_pct); ws.write(row, 7, tf_uds, t_pct)
+        ws.write(row, 8, t_perd, loss_f if t_perd > 0 else money_f)
         row += 2
 
         if stock_stats:
@@ -594,9 +725,9 @@ def build_excel(results, all_stats, stock_stats, all_warnings, all_losses=None):
             row += 1
 
         for c, h in enumerate(["", "Ubicación", "Lotes\nauditados", "Uds.\ninventariadas",
-                                "Lotes\nerróneos", "Fiabilidad\n(lotes)", "Fiabilidad\n(uds.)",
+                                "Lotes\nerróneos", "Uds.\nerróneas", "Fiabilidad\n(lotes)", "Fiabilidad\n(uds.)",
                                 "Pérdida (€)", "Tipo de error"]):
-            fmt = loss_hdr if c == 7 else hdr_f
+            fmt = loss_hdr if c == 8 else hdr_f
             ws.write(row, c, h, fmt)
         ws.set_row(row, 35)
         row += 1
@@ -621,34 +752,37 @@ def build_excel(results, all_stats, stock_stats, all_warnings, all_losses=None):
                 ws.write(row, 2, int(r["lotes_auditados"]), d_c)
                 ws.write(row, 3, int(r["uds_inventariadas"]), d_c)
                 ws.write(row, 4, int(r["lotes_erroneos"]), d_c)
-                wpct(row, 5, r["Fiabilidad"])
-                wpct(row, 6, r["Fiabilidad_uds"])
+                uds_err_val = int(r.get("uds_erroneas", 0))
+                ws.write(row, 5, uds_err_val, d_c) if uds_err_val > 0 else ws.write(row, 5, "", d_f)
+                wpct(row, 6, r["Fiabilidad"])
+                wpct(row, 7, r["Fiabilidad_uds"])
                 perd_val = float(r.get("perdida_monetaria", 0))
                 if perd_val > 0:
-                    ws.write(row, 7, perd_val, loss_cell)
+                    ws.write(row, 8, perd_val, loss_cell)
                 else:
-                    ws.write(row, 7, "", d_f)
+                    ws.write(row, 8, "", d_f)
                 obs_text = r.get("obs_inventario", "")
                 if isinstance(obs_text, str) and obs_text.strip().lower() == "nan":
                     obs_text = ""
-                ws.write(row, 8, obs_text, obs_f)
+                ws.write(row, 9, obs_text, obs_f)
                 row += 1
             ws.write(row, 0, f"Subtotal {stype}", t_lbl)
             ws.write(row, 1, f"{stats['ubicaciones']} ubic.", t_lbl)
             ws.write(row, 2, stats["lotes_total"], t_num)
             ws.write(row, 3, int(stats["uds_inventariadas"]), t_num)
             ws.write(row, 4, stats["lotes_error"], t_num)
-            ws.write(row, 5, stats["fiabilidad_global"], t_pct)
-            ws.write(row, 6, stats["fiabilidad_uds"], t_pct)
-            ws.write(row, 7, stats["perdida_monetaria"], loss_f if stats["perdida_monetaria"] > 0 else t_num)
-            ws.write(row, 8, "", t_lbl)
+            ws.write(row, 5, int(stats["uds_erroneas"]), t_num)
+            ws.write(row, 6, stats["fiabilidad_global"], t_pct)
+            ws.write(row, 7, stats["fiabilidad_uds"], t_pct)
+            ws.write(row, 8, stats["perdida_monetaria"], loss_f if stats["perdida_monetaria"] > 0 else t_num)
+            ws.write(row, 9, "", t_lbl)
             row += 1
 
         # === SIDE TABLE: Control Diferenciado — Process compliance ===
         if ctrl_start is not None and "CONTROL DIFERENCIADO" in results:
             ck = results["CONTROL DIFERENCIADO"]
             cs = all_stats["CONTROL DIFERENCIADO"]
-            sc = 10  # start column (after main table cols 0-8 + gap)
+            sc = 11  # start column (after main table cols 0-9 + gap)
             for ci in range(sc, sc + 5):
                 ws.set_column(ci, ci, 22)
             hr = max(ctrl_start - 2, 0)
@@ -678,7 +812,7 @@ def build_excel(results, all_stats, stock_stats, all_warnings, all_losses=None):
         if "MATERIAL VALIOSO" in all_stats:
             vs = all_stats["MATERIAL VALIOSO"]
             row += 1
-            ws.merge_range(row, 0, row, 8, "RESUMEN MATERIAL VALIOSO", sub_f)
+            ws.merge_range(row, 0, row, 9, "RESUMEN MATERIAL VALIOSO", sub_f)
             row += 1
             ws.write(row, 0, "Valor total auditado", d_f); ws.write(row, 1, vs["valor_auditado"], money_f)
             ws.write(row, 2, "Referencias únicas", d_f); ws.write(row, 3, vs["referencias_unicas"], d_c)
@@ -689,7 +823,7 @@ def build_excel(results, all_stats, stock_stats, all_warnings, all_losses=None):
             ws.write(row, 2, "Fiabilidad (lotes)", d_f); wpct(row, 3, vs["fiabilidad_global"])
             ws.write(row, 4, "Fiabilidad (uds.)", d_f); wpct(row, 5, vs["fiabilidad_uds"])
 
-        ws.print_area(0, 0, row + 1, 14)
+        ws.print_area(0, 0, row + 1, 15)
         ws.set_landscape()
         ws.set_paper(9)
         ws.fit_to_pages(1, 0)
@@ -780,3 +914,87 @@ if results:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True, type="primary",
     )
+
+
+# =============================================================================
+# 9. SAVE TO HISTORY
+# =============================================================================
+if results and not SS.get("consol_saved_to_history", False):
+    st.divider()
+    st.markdown(
+        "**Guardar en historial** — Para mantener un registro de auditorías realizadas."
+    )
+    if st.button("Guardar este reporte en el historial", type="secondary", use_container_width=True):
+        hist = load_consol_history()
+        key = f"{date.today().isoformat()}_{centro_sel or 'sin_centro'}"
+        entry = {
+            "key": key,
+            "fecha": date.today().isoformat(),
+            "centro": centro_sel,
+            "total": {
+                "ubicaciones": sum(s["ubicaciones"] for s in all_stats.values()),
+                "lotes_total": sum(s["lotes_total"] for s in all_stats.values()),
+                "lotes_error": sum(s["lotes_error"] for s in all_stats.values()),
+                "uds_inventariadas": sum(s["uds_inventariadas"] for s in all_stats.values()),
+                "uds_erroneas": sum(s["uds_erroneas"] for s in all_stats.values()),
+                "fiabilidad_lotes": total_fiab,
+                "fiabilidad_uds": total_fiab_uds,
+                "perdida_monetaria": total_perdida,
+            },
+            "secciones": {stype: stats for stype, stats in all_stats.items()},
+        }
+        if stock_stats:
+            entry["cobertura"] = stock_stats
+        # Dedup by key
+        hist = [h for h in hist if h.get("key") != key]
+        hist.append(entry)
+        hist.sort(key=lambda h: h["key"])
+        save_consol_history(hist)
+        SS["consol_saved_to_history"] = True
+        st.rerun()
+elif results and SS.get("consol_saved_to_history"):
+    st.success("Reporte guardado en el historial.")
+
+
+# =============================================================================
+# 10. HISTORICAL DATA
+# =============================================================================
+st.divider()
+st.header("Historial de auditorías")
+
+consol_hist = load_consol_history()
+
+if not consol_hist:
+    st.info("No hay auditorías guardadas en el historial.")
+else:
+    # Trend table
+    hist_rows = []
+    for h in consol_hist:
+        t = h.get("total", {})
+        hist_rows.append({
+            "Fecha": h.get("fecha", ""),
+            "Centro": h.get("centro", "—"),
+            "Ubicaciones": t.get("ubicaciones", 0),
+            "Lotes": t.get("lotes_total", 0),
+            "Lotes err.": t.get("lotes_error", 0),
+            "Uds. inv.": f"{t.get('uds_inventariadas', 0):,.0f}",
+            "Uds. err.": f"{t.get('uds_erroneas', 0):,.0f}",
+            "Fiab. lotes": f"{t.get('fiabilidad_lotes', 1):.2%}",
+            "Fiab. uds.": f"{t.get('fiabilidad_uds', 1):.2%}",
+            "Pérdida (€)": f"{t.get('perdida_monetaria', 0):,.2f}",
+        })
+    st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+
+    with st.expander("Gestionar historial"):
+        for i, h in enumerate(consol_hist):
+            c1, c2 = st.columns([5, 1])
+            c1.write(f"**{h.get('fecha', '')}** — {h.get('centro', 'Sin centro')} "
+                     f"({h.get('total', {}).get('ubicaciones', 0)} ubic.)")
+            if c2.button("Eliminar", key=f"del_consol_{i}", type="secondary"):
+                hist_current = load_consol_history()
+                hist_current = [x for x in hist_current if x.get("key") != h["key"]]
+                save_consol_history(hist_current)
+                st.rerun()
+        if st.button("Limpiar todo el historial", type="secondary"):
+            save_consol_history([])
+            st.rerun()
