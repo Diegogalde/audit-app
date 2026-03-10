@@ -58,17 +58,14 @@ def save_consol_history(entries):
 # =============================================================================
 SS = st.session_state
 
-centros = load_centros_trabajo()
-if centros:
-    centro_sel = st.selectbox(
-        "Centro de trabajo",
-        options=centros,
-        key="rpt_centro",
-        help="Selecciona el centro al que corresponde esta auditoría",
-    )
-else:
-    st.info("No hay centros registrados. Regístralos en la pestaña de Absentismo.")
-    centro_sel = None
+CENTROS_DISPONIBLES = ["Noain", "Post-Venta", "Export-OTC", "Arazuri"]
+
+centro_sel = st.selectbox(
+    "Centro de trabajo",
+    options=CENTROS_DISPONIBLES,
+    key="rpt_centro",
+    help="Selecciona el centro al que corresponde esta auditoría",
+)
 
 st.sidebar.header("Archivos — Reporte")
 audit_up = st.sidebar.file_uploader("Excel de auditoría rellenado", type=["xlsx", "xls"], key="rpt_audit_up")
@@ -188,10 +185,10 @@ def process_sheet(df, is_control=False, df_values_ext=None):
                 vdf["_ext_val"] = pd.to_numeric(vdf[ext_valor], errors="coerce")
                 vdf = vdf.dropna(subset=["_ext_val"])
                 if ext_mat:
-                    vdf["_ext_mat"] = vdf[ext_mat].astype(str).str.strip()
+                    vdf["_ext_mat"] = vdf[ext_mat].astype(str).str.strip().str.lstrip("0")
                 if ext_lote:
                     vdf["_ext_lote"] = vdf[ext_lote].astype(str).str.strip()
-                df["_mat_k"] = df[col_mat].astype(str).str.strip() if col_mat else ""
+                df["_mat_k"] = df[col_mat].astype(str).str.strip().str.lstrip("0") if col_mat else ""
                 df["_lote_k"] = df[col_lote].astype(str).str.strip() if col_lote else ""
                 # 3-level cascade: mat+lote → lote → mat
                 # Use map-based approach to avoid index alignment issues
@@ -397,14 +394,14 @@ def extract_loss_detail(df, stype, df_values_ext=None):
     if not col_ubic or not col_stock or not col_fisica:
         return []
 
-    # Build external value lookup if available
+    # Build external value lookup if available (keyed by normalized material)
     _ext_lookup = {}
     if df_values_ext is not None:
         ext_mat = find_col(df_values_ext.columns, ["Material", "Ref. Material", "Referencia"])
         ext_valor = find_col(df_values_ext.columns, ["Valor unitario", "Valor Unitario", "Unit Value", "Precio"])
         if ext_mat and ext_valor:
             for _, vr in df_values_ext.iterrows():
-                mk = str(vr[ext_mat]).strip()
+                mk = str(vr[ext_mat]).strip().lstrip("0")
                 vv = pd.to_numeric(vr[ext_valor], errors="coerce")
                 if not pd.isna(vv) and mk not in _ext_lookup:
                     _ext_lookup[mk] = vv
@@ -418,9 +415,9 @@ def extract_loss_detail(df, stype, df_values_ext=None):
         if fis < stk:
             uds_perdidas = stk - fis
             val_unit = pd.to_numeric(row[col_valor_unit], errors="coerce") if col_valor_unit else np.nan
-            # Fallback to external values
-            if pd.isna(val_unit) and col_mat and _ext_lookup:
-                mk = str(row[col_mat]).strip()
+            # Fallback to external values (when missing or zero)
+            if (pd.isna(val_unit) or val_unit == 0) and col_mat and _ext_lookup:
+                mk = str(row[col_mat]).strip().lstrip("0")
                 val_unit = _ext_lookup.get(mk, np.nan)
             perdida = uds_perdidas * val_unit if not pd.isna(val_unit) else np.nan
             losses.append({
