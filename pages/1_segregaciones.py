@@ -260,6 +260,18 @@ if df_values_all is not None:
             merged = merged[merged["_valor_unitario"].notna()].copy()
             st.info(f"Eliminadas {n_sin:,} líneas. Quedan **{len(merged):,}**.")
 
+    # --- Filter items with unit value < 30€ ---
+    if "_valor_unitario" in merged.columns:
+        n_antes = len(merged)
+        mask_bajo_valor = merged["_valor_unitario"].notna() & (merged["_valor_unitario"] < 30)
+        n_bajo_valor = int(mask_bajo_valor.sum())
+        if n_bajo_valor > 0:
+            merged = merged[~mask_bajo_valor].copy()
+            st.info(
+                f"Excluidas **{n_bajo_valor:,}** líneas con valor unitario < 30 € "
+                f"(de {n_antes:,}). Quedan **{len(merged):,}**."
+            )
+
 
 # =============================================================================
 # 7. PREVIEW
@@ -441,7 +453,7 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
 
     today_str = date.today().strftime("%d-%m-%Y")
 
-    def build_audit_df(seg_df, include_value=False, is_control=False):
+    def build_audit_df(seg_df, is_control=False):
         out = pd.DataFrame()
         out["Fecha"] = [today_str] * len(seg_df)
         out["Ref. centro"] = seg_df[COL_CENTRO].values if COL_CENTRO else ""
@@ -450,7 +462,8 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
         out["Ref. Material"] = seg_df[COL_MAT].values
         out["Descripción"] = seg_df[COL_DESC].values if COL_DESC else ""
         out["Nº Lote"] = seg_df[COL_LOTE].values
-        if include_value:
+        # Always include value columns so consolidado can compute monetary loss
+        if "_valor_unitario" in seg_df.columns:
             out["Valor unitario"] = seg_df["_valor_unitario"].values
             out["Valor total"] = seg_df["Valor_Total"].values
         out["Nº Serie"] = seg_df[COL_SERIE].values if COL_SERIE else ""
@@ -474,13 +487,13 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
 
     if "Aleatorio" in tipos_seg:
         seg_alea = merged[merged[COL_UBIC].isin(samp_alea)].copy()
-        seg_alea_fmt = build_audit_df(seg_alea, include_value=True)
+        seg_alea_fmt = build_audit_df(seg_alea)
     if "Control Diferenciado" in tipos_seg:
         seg_ctrl = merged[merged[COL_UBIC].isin(samp_ctrl)].copy()
         seg_ctrl_fmt = build_audit_df(seg_ctrl, is_control=True)
     if "Material Valioso" in tipos_seg:
         seg_val = merged[merged[COL_UBIC].isin(top_val)].copy()
-        seg_val_fmt = build_audit_df(seg_val, include_value=True)
+        seg_val_fmt = build_audit_df(seg_val)
 
     # Store results in session_state so they persist across reruns
     SS["seg_results"] = {

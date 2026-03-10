@@ -277,6 +277,44 @@ def validate_sheet(df, stype):
     return warnings
 
 
+def extract_loss_detail(df, stype):
+    """Extract lines with negative discrepancy (physical < stock) and their monetary loss."""
+    col_ubic = find_col(df.columns, ["Ubicacion", "Ubicación"])
+    col_mat = find_col(df.columns, ["Ref. Material", "Material"])
+    col_lote = find_col(df.columns, ["Nº Lote", "Lote"])
+    col_desc = find_col(df.columns, ["Descripción", "Descripcion"])
+    col_stock = find_col(df.columns, ["Stock", "Cantidad"])
+    col_fisica = find_col(df.columns, ["Cant. Física", "Cant. Fisica"])
+    col_valor_unit = find_col(df.columns, ["Valor unitario", "Valor Unitario", "Precio"])
+
+    if not col_ubic or not col_stock or not col_fisica:
+        return []
+
+    losses = []
+    for _, row in df.iterrows():
+        fis = pd.to_numeric(row[col_fisica], errors="coerce") if col_fisica else np.nan
+        stk = pd.to_numeric(row[col_stock], errors="coerce") if col_stock else np.nan
+        if pd.isna(fis) or pd.isna(stk):
+            continue
+        if fis < stk:
+            uds_perdidas = stk - fis
+            val_unit = pd.to_numeric(row[col_valor_unit], errors="coerce") if col_valor_unit else np.nan
+            perdida = uds_perdidas * val_unit if not pd.isna(val_unit) else np.nan
+            losses.append({
+                "Sección": stype,
+                "Ubicación": str(row[col_ubic]) if col_ubic else "",
+                "Material": str(row[col_mat]) if col_mat else "",
+                "Descripción": str(row[col_desc]) if col_desc else "",
+                "Lote": str(row[col_lote]) if col_lote else "",
+                "Stock SAP": stk,
+                "Cant. Física": fis,
+                "Uds. perdidas": uds_perdidas,
+                "Valor unitario": val_unit if not pd.isna(val_unit) else None,
+                "Pérdida (€)": perdida if not pd.isna(perdida) else None,
+            })
+    return losses
+
+
 # =============================================================================
 # 5. RUN PROCESSING + VALIDATION
 # =============================================================================
@@ -289,8 +327,10 @@ for stype, df in sheet_map.items():
         all_stats[stype] = stats
 
 all_warnings = []
+all_losses = []
 for stype, df in sheet_map.items():
     all_warnings.extend(validate_sheet(df, stype))
+    all_losses.extend(extract_loss_detail(df, stype))
 
 stock_stats = {}
 if df_stock_orig is not None:
@@ -344,6 +384,27 @@ if stock_stats:
         tr = sum(s["referencias_unicas"] for s in all_stats.values())
         pr = tr / stock_stats["total_referencias"] * 100
         cv3.metric("% Referencias", f"{pr:.1f}%", delta=f"{tr} de {stock_stats['total_referencias']}")
+
+# --- Loss detail ---
+if all_losses:
+    st.divider()
+    st.header("Detalle de pérdidas (descuadre negativo)")
+    df_losses = pd.DataFrame(all_losses)
+    total_uds_perd = df_losses["Uds. perdidas"].sum()
+    total_val_perd = df_losses["Pérdida (€)"].sum()
+    lp1, lp2, lp3 = st.columns(3)
+    lp1.metric("Líneas con pérdida", len(df_losses))
+    lp2.metric("Uds. perdidas totales", f"{total_uds_perd:,.0f}")
+    lp3.metric("Pérdida total", f"{total_val_perd:,.2f} €" if not pd.isna(total_val_perd) else "Sin valor unit.")
+
+    # Format for display
+    df_loss_disp = df_losses.copy()
+    df_loss_disp["Uds. perdidas"] = df_loss_disp["Uds. perdidas"].map(lambda x: f"{x:,.0f}")
+    df_loss_disp["Valor unitario"] = df_loss_disp["Valor unitario"].map(
+        lambda x: f"{x:,.2f} €" if pd.notna(x) else "—")
+    df_loss_disp["Pérdida (€)"] = df_loss_disp["Pérdida (€)"].map(
+        lambda x: f"{x:,.2f} €" if pd.notna(x) else "—")
+    st.dataframe(df_loss_disp, use_container_width=True, hide_index=True)
 
 st.divider()
 
@@ -443,7 +504,7 @@ else:
 st.header("Descargar Reporte")
 
 
-def build_excel(results, all_stats, stock_stats, all_warnings):
+def build_excel(results, all_stats, stock_stats, all_warnings, all_losses=None):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         ws_name = "KIPs Consolidado Aud.Interna"
@@ -660,13 +721,61 @@ def build_excel(results, all_stats, stock_stats, all_warnings):
                 vws.set_column(ci, ci, min(mx + 3, 40))
             vws.freeze_panes(1, 0)
 
+        # --- Loss detail sheet ---
+        if all_losses:
+            lws_name = "Detalle Pérdidas"
+            df_l = pd.DataFrame(all_losses)
+            df_l.to_excel(writer, sheet_name=lws_name, index=False)
+            lws = writer.sheets[lws_name]
+
+            l_hdr = wb.add_format({"bold": True, "font_size": 10, "bg_color": "#9C0006",
+                                   "font_color": "white", "border": 1, "text_wrap": True, "align": "center"})
+            l_cell = wb.add_format({"font_size": 10, "border": 1})
+            l_money = wb.add_format({"font_size": 10, "border": 1, "num_format": "#,##0.00 €",
+                                     "font_color": "#9C0006"})
+            l_num = wb.add_format({"font_size": 10, "border": 1, "align": "center", "num_format": "#,##0"})
+
+            for ci, cn in enumerate(df_l.columns):
+                lws.write(0, ci, cn, l_hdr)
+            for ri in range(len(df_l)):
+                for ci in range(len(df_l.columns)):
+                    val = df_l.iloc[ri, ci]
+                    cn = df_l.columns[ci]
+                    if pd.isna(val) or val is None:
+                        lws.write_blank(ri + 1, ci, "", l_cell)
+                    elif cn in ("Pérdida (€)", "Valor unitario"):
+                        lws.write_number(ri + 1, ci, float(val), l_money)
+                    elif cn in ("Stock SAP", "Cant. Física", "Uds. perdidas"):
+                        lws.write_number(ri + 1, ci, float(val), l_num)
+                    else:
+                        lws.write(ri + 1, ci, val, l_cell)
+
+            # Total row
+            total_row = len(df_l) + 1
+            lws.write(total_row, 0, "TOTAL", t_lbl)
+            for ci in range(1, len(df_l.columns)):
+                cn = df_l.columns[ci]
+                if cn == "Uds. perdidas":
+                    lws.write_number(total_row, ci, float(df_l[cn].sum()), t_num)
+                elif cn == "Pérdida (€)":
+                    total_p = df_l[cn].sum()
+                    lws.write_number(total_row, ci, float(total_p) if not pd.isna(total_p) else 0, loss_f)
+                else:
+                    lws.write(total_row, ci, "", t_lbl)
+
+            for ci, cn in enumerate(df_l.columns):
+                mx = max(df_l[cn].astype(str).map(len).max(), len(str(cn)))
+                lws.set_column(ci, ci, min(mx + 3, 40))
+            lws.freeze_panes(1, 0)
+            lws.set_landscape()
+
     return output.getvalue()
 
 
 if results:
     st.download_button(
         "Descargar Reporte Consolidado (Excel)",
-        build_excel(results, all_stats, stock_stats, all_warnings),
+        build_excel(results, all_stats, stock_stats, all_warnings, all_losses),
         file_name=f"CONSOLIDADO_AUDITORIA_INTERNA_{date.today().strftime('%d-%m-%Y')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True, type="primary",
