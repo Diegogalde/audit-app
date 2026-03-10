@@ -24,6 +24,14 @@ _render_metodologia("absentismo")
 
 SS = st.session_state
 
+CENTROS_DISPONIBLES = ["Noain", "Post-Venta", "Export-OTC", "Arazuri"]
+abs_centro_sel = st.selectbox(
+    "Centro de trabajo",
+    options=CENTROS_DISPONIBLES,
+    key="abs_centro",
+    help="Selecciona el centro para este análisis",
+)
+
 MONTH_NAMES = {
     1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
     5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
@@ -902,31 +910,7 @@ with st.sidebar.expander(_cal_label):
                 delete_center_calendar(cname)
                 st.rerun()
 
-# ── 4. CENTROS DE TRABAJO ──
-centros_registrados = load_centros_trabajo()
-_centros_label = f"Centros de trabajo ({len(centros_registrados)})" if centros_registrados else "Centros de trabajo"
-with st.sidebar.expander(_centros_label):
-    st.caption("Registra los centros para facilitar la asignación de calendarios.")
-    if centros_registrados:
-        for cn in centros_registrados:
-            _cc1, _cc2 = st.columns([3, 1])
-            _cc1.markdown(f"**{cn}**")
-            if _cc2.button("X", key=f"del_centro_{cn}", type="secondary"):
-                centros_registrados = [c for c in centros_registrados if c != cn]
-                save_centros_trabajo(centros_registrados)
-                st.rerun()
-    _nuevo_centro = st.text_input("Nuevo centro", placeholder="Ej: Almacén Pamplona", key="nuevo_centro_input", label_visibility="collapsed")
-    if st.button("Registrar centro", key="btn_add_centro", use_container_width=True):
-        if _nuevo_centro.strip():
-            centros_registrados = load_centros_trabajo()
-            if _nuevo_centro.strip() not in centros_registrados:
-                centros_registrados.append(_nuevo_centro.strip())
-                save_centros_trabajo(centros_registrados)
-                st.rerun()
-            else:
-                st.warning("El centro ya existe")
-        else:
-            st.warning("Escribe un nombre de centro")
+# ── 4. CENTROS DE TRABAJO (removed — now hardcoded at page top) ──
 
 # ── 5. PLANTILLA DE EMPLEADOS ──
 employee_override = load_employee_list()
