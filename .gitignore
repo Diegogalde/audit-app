@@ -11,4 +11,5 @@ data/absentismo_historico.json
 data/calendario_laboral.json
 data/plantilla_empleados.json
 data/centros_trabajo.json
+data/consolidado_historico.json
 .streamlit/secrets.toml

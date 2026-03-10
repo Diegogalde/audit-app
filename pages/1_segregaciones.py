@@ -30,6 +30,7 @@ def find_col(columns, candidates):
 # AUDIT HISTORY — persistent JSON storage
 # =============================================================================
 HISTORY_FILE = Path(__file__).resolve().parent.parent / "data" / "audit_history.json"
+CENTROS_FILE = Path(__file__).resolve().parent.parent / "data" / "centros_trabajo.json"
 
 
 def load_history():
@@ -45,9 +46,28 @@ def save_history(entries):
         json.dump(entries, f, ensure_ascii=False, indent=2)
 
 
+def load_centros_trabajo():
+    if CENTROS_FILE.exists():
+        with open(CENTROS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
 # =============================================================================
-# 1. SEGREGATION TYPE SELECTOR
+# 1. SEGREGATION TYPE SELECTOR + CENTER
 # =============================================================================
+centros = load_centros_trabajo()
+if centros:
+    centro_sel = st.selectbox(
+        "Centro de trabajo",
+        options=centros,
+        key="seg_centro",
+        help="Selecciona el centro para el que generas esta segregación",
+    )
+else:
+    st.info("No hay centros registrados. Regístralos en la pestaña de Absentismo.")
+    centro_sel = None
+
 tipos_seg = st.multiselect(
     "Segregaciones a generar",
     ["Aleatorio", "Control Diferenciado", "Material Valioso"],
@@ -339,16 +359,22 @@ hist_prev_val = set()
 hist_prev_ctrl = set()
 
 if no_repetir:
-    hist = load_history()
+    hist_all = load_history()
+    # Filter by selected center (entries without "centro" match all)
+    if centro_sel:
+        hist = [e for e in hist_all if e.get("centro") == centro_sel or not e.get("centro")]
+    else:
+        hist = hist_all
     if hist:
         for entry in hist:
             hist_prev_val.update(entry.get("valioso_ubicaciones", []))
             hist_prev_ctrl.update(entry.get("control_ubicaciones", []))
-        with st.expander(f"Historial: {len(hist)} auditoría(s) anterior(es)"):
+        with st.expander(f"Historial: {len(hist)} auditoría(s) para {centro_sel or 'todos'}"):
             for entry in hist:
                 n_v = len(entry.get("valioso_ubicaciones", []))
                 n_c = len(entry.get("control_ubicaciones", []))
-                st.markdown(f"- **{entry['fecha']}** — Valioso: {n_v} ubic., Control: {n_c} ubic.")
+                c_label = entry.get("centro", "Sin centro")
+                st.markdown(f"- **{entry['fecha']}** [{c_label}] — Valioso: {n_v} ubic., Control: {n_c} ubic.")
             if st.button("Limpiar historial", type="secondary"):
                 save_history([])
                 st.rerun()
@@ -508,6 +534,7 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
         "tipos_seg": list(tipos_seg),
         "warnings": _gen_warnings,
         "saved_to_history": False,
+        "centro": centro_sel,
     }
 
 
@@ -782,6 +809,7 @@ if "seg_results" in SS:
             hist = load_history()
             hist.append({
                 "fecha": date.today().isoformat(),
+                "centro": res.get("centro"),
                 "valioso_ubicaciones": [str(u) for u in top_val],
                 "control_ubicaciones": [str(u) for u in samp_ctrl],
                 "aleatorio_ubicaciones": [str(u) for u in samp_alea],
