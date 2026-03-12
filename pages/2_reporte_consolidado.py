@@ -239,22 +239,28 @@ def process_sheet(df, is_control=False, df_values_ext=None):
     # Monetary loss = missing units × unit value
     df["_perdida_monetaria"] = df["_descuadre_neg"] * df["_valor_unit"]
 
-    # Fallo: ANY non-empty value counts (except "no", "n", empty, nan) — ALL sections
-    df["_fallo_proceso"] = False
-    if col_fallo:
-        fallo_raw = df[col_fallo].fillna("").astype(str).str.strip()
-        fallo_lower = fallo_raw.str.lower()
-        df["_fallo_proceso"] = (fallo_raw != "") & (~fallo_lower.isin(["nan", "no", "n"]))
-    # Process failure metrics
-    df["_uds_fallo"] = np.where(df["_fallo_proceso"], df["_stock"], 0)
-    df["_potencial_perdida_proc"] = np.where(df["_fallo_proceso"], df["_stock"] * df["_valor_unit"], 0)
-
+    # Obs columns (needed before fallo detection)
     df["_obs_inv"] = ""
     if col_obs_inv:
         df["_obs_inv"] = df[col_obs_inv].fillna("").astype(str)
     df["_obs_proc"] = ""
     if col_obs_proc:
         df["_obs_proc"] = df[col_obs_proc].fillna("").astype(str)
+
+    # Fallo de proceso: if Obs. Proceso has content → fallo. Also if Fallo column marked.
+    df["_fallo_proceso"] = False
+    if col_obs_proc:
+        obs_raw = df[col_obs_proc].fillna("").astype(str).str.strip()
+        obs_lower = obs_raw.str.lower()
+        df["_fallo_proceso"] = (obs_raw != "") & (~obs_lower.isin(["nan", ""]))
+    if col_fallo:
+        fallo_raw = df[col_fallo].fillna("").astype(str).str.strip()
+        fallo_lower = fallo_raw.str.lower()
+        fallo_explicit = (fallo_raw != "") & (~fallo_lower.isin(["nan", "no", "n"]))
+        df["_fallo_proceso"] = df["_fallo_proceso"] | fallo_explicit
+    # Process failure metrics
+    df["_uds_fallo"] = np.where(df["_fallo_proceso"], df["_stock"], 0)
+    df["_potencial_perdida_proc"] = np.where(df["_fallo_proceso"], df["_stock"] * df["_valor_unit"], 0)
 
     agg = {
         "lotes_auditados": ("_stock", "size"),
