@@ -56,17 +56,13 @@ def load_centros_trabajo():
 # =============================================================================
 # 1. SEGREGATION TYPE SELECTOR + CENTER
 # =============================================================================
-centros = load_centros_trabajo()
-if centros:
-    centro_sel = st.selectbox(
-        "Centro de trabajo",
-        options=centros,
-        key="seg_centro",
-        help="Selecciona el centro para el que generas esta segregación",
-    )
-else:
-    st.info("No hay centros registrados. Regístralos en la pestaña de Absentismo.")
-    centro_sel = None
+CENTROS_DISPONIBLES = ["Noain", "Post-Venta", "Export-OTC", "Arazuri"]
+centro_sel = st.selectbox(
+    "Centro de trabajo",
+    options=CENTROS_DISPONIBLES,
+    key="seg_centro",
+    help="Selecciona el centro para el que generas esta segregación",
+)
 
 tipos_seg = st.multiselect(
     "Segregaciones a generar",
@@ -479,7 +475,7 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
 
     today_str = date.today().strftime("%d-%m-%Y")
 
-    def build_audit_df(seg_df, is_control=False):
+    def build_audit_df(seg_df):
         out = pd.DataFrame()
         out["Fecha"] = [today_str] * len(seg_df)
         out["Ref. centro"] = seg_df[COL_CENTRO].values if COL_CENTRO else ""
@@ -500,12 +496,9 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
         out["Stock OK"] = seg_df[COL_SOK].values if COL_SOK else ""
         out["Stock Bloqueado"] = seg_df[COL_SBL].values if COL_SBL else 0
         out["Tipo Bloqueo"] = seg_df[COL_TBLOQ].values if COL_TBLOQ else ""
-        if is_control:
-            out["Fallo en el proceso"] = np.nan
-            out["Obs. Inventario"] = np.nan
-            out["Obs. Proceso"] = np.nan
-        else:
-            out["Observaciones Inventario"] = np.nan
+        out["Fallo en el proceso"] = np.nan
+        out["Obs. Inventario"] = np.nan
+        out["Obs. Proceso"] = np.nan
         return out.sort_values("Ubicacion").reset_index(drop=True)
 
     # Build only selected segregations
@@ -516,7 +509,7 @@ if st.button("Generar Segregaciones", type="primary", use_container_width=True):
         seg_alea_fmt = build_audit_df(seg_alea)
     if "Control Diferenciado" in tipos_seg:
         seg_ctrl = merged[merged[COL_UBIC].isin(samp_ctrl)].copy()
-        seg_ctrl_fmt = build_audit_df(seg_ctrl, is_control=True)
+        seg_ctrl_fmt = build_audit_df(seg_ctrl)
     if "Material Valioso" in tipos_seg:
         seg_val = merged[merged[COL_UBIC].isin(top_val)].copy()
         seg_val_fmt = build_audit_df(seg_val)
@@ -583,7 +576,6 @@ if "seg_results" in SS:
                 elif kind == "ctrl":
                     nc = raw_df["_es_control"].sum() if raw_df is not None and not raw_df.empty else 0
                     st.markdown(f"**{len(locs)}** ubic. · **{len(fmt_df):,}** líneas · Control: **{nc:,}**")
-                    st.caption("Columnas operarios: **Cant. Física**, **Fallo en el proceso**, **Obs. Inventario**, **Obs. Proceso**")
                 elif kind == "val":
                     val_cubierto = raw_df["Valor_Total"].sum() if raw_df is not None and not raw_df.empty else 0
                     pct_cub = (val_cubierto / valor_total_almacen_r * 100) if valor_total_almacen_r > 0 else 0
@@ -668,32 +660,30 @@ if "seg_results" in SS:
             row += 1
         row += 1
 
-        # Valuable/random extra columns
-        ws.merge_range(row, 0, row, 2, "COLUMNAS ADICIONALES — Material Valioso y Aleatorio", section_f)
+        # Value columns
+        ws.merge_range(row, 0, row, 2, "COLUMNAS ADICIONALES — Valor", section_f)
         row += 1
         val_cols = [
             ("Valor unitario", "Sistema", "Precio unitario del material según SAP. No modificar."),
             ("Valor total", "Sistema", "Valor total de la línea (precio × cantidad). No modificar."),
-            ("Observaciones Inventario", "OPERARIO", "Anotar cualquier incidencia: material dañado, ubicación incorrecta, material no encontrado, diferencia de lote, etc."),
         ]
         for col, tipo, desc in val_cols:
-            fmt = hdr_yellow if tipo == "OPERARIO" else cell_bold
-            ws.write(row, 0, col, fmt)
+            ws.write(row, 0, col, cell_bold)
             ws.write(row, 1, tipo, cell_f)
             ws.write(row, 2, desc, cell_f)
-            ws.set_row(row, 30 if tipo == "OPERARIO" else 20)
+            ws.set_row(row, 20)
             row += 1
         row += 1
 
-        # Control diferenciado extra columns
-        ws.merge_range(row, 0, row, 2, "COLUMNAS ADICIONALES — Control Diferenciado", section_f)
+        # Process + observation columns (ALL segregations)
+        ws.merge_range(row, 0, row, 2, "COLUMNAS DE OBSERVACIÓN Y PROCESO (TODAS LAS PESTAÑAS)", section_f)
         row += 1
-        ctrl_cols = [
+        proc_cols = [
             ("Fallo en el proceso", "OPERARIO", "Marcar SI o NO. ¿Se ha detectado un fallo en el proceso logístico? (ubicación errónea, material mal almacenado, etiqueta incorrecta, etc.)"),
             ("Obs. Inventario", "OPERARIO", "Observaciones sobre el conteo: material dañado, no encontrado, diferencia de lote, etc."),
             ("Obs. Proceso", "OPERARIO", "Describir el fallo de proceso detectado: qué estaba mal, posible causa, acción sugerida."),
         ]
-        for col, tipo, desc in ctrl_cols:
+        for col, tipo, desc in proc_cols:
             ws.write(row, 0, col, hdr_yellow)
             ws.write(row, 1, tipo, cell_f)
             ws.write(row, 2, desc, cell_f)
@@ -775,10 +765,11 @@ if "seg_results" in SS:
                 ws.freeze_panes(1, 0)
         return output.getvalue()
 
+    _editable_cols = ["Cant. Física", "Descuadre", "Fallo en el proceso", "Obs. Inventario", "Obs. Proceso"]
     edit_map = {
-        "material  control diferenc": ["Cant. Física", "Descuadre", "Fallo en el proceso", "Obs. Inventario", "Obs. Proceso"],
-        "material Valioso": ["Cant. Física", "Descuadre", "Observaciones Inventario"],
-        "material aleatorio": ["Cant. Física", "Descuadre", "Observaciones Inventario"],
+        "material  control diferenc": _editable_cols,
+        "material Valioso": _editable_cols,
+        "material aleatorio": _editable_cols,
     }
 
     combined = {}
