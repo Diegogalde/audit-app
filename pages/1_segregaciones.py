@@ -365,18 +365,10 @@ if no_repetir:
         for entry in hist:
             hist_prev_val.update(entry.get("valioso_ubicaciones", []))
             hist_prev_ctrl.update(entry.get("control_ubicaciones", []))
-        with st.expander(f"Historial: {len(hist)} auditoría(s) para {centro_sel or 'todos'}"):
-            for entry in hist:
-                n_v = len(entry.get("valioso_ubicaciones", []))
-                n_c = len(entry.get("control_ubicaciones", []))
-                c_label = entry.get("centro", "Sin centro")
-                st.markdown(f"- **{entry['fecha']}** [{c_label}] — Valioso: {n_v} ubic., Control: {n_c} ubic.")
-            if st.button("Limpiar historial", type="secondary"):
-                save_history([])
-                st.rerun()
         st.info(
             f"Se excluirán **{len(hist_prev_val)}** ubic. de Valioso y "
-            f"**{len(hist_prev_ctrl)}** ubic. de Control Diferenciado"
+            f"**{len(hist_prev_ctrl)}** ubic. de Control Diferenciado "
+            f"(gestiona el historial en la pestaña **Historiales**)"
         )
     else:
         st.info("No hay historial previo. Genera y guarda para empezar a rotar ubicaciones.")
