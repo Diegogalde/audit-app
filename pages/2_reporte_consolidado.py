@@ -53,6 +53,7 @@ def save_consol_history(entries):
         json.dump(entries, f, ensure_ascii=False, indent=2)
 
 
+
 # =============================================================================
 # 1. CENTER SELECTOR + FILE UPLOADS — persisted in session_state
 # =============================================================================
@@ -1096,17 +1097,17 @@ elif results and SS.get("consol_saved_to_history"):
 
 
 # =============================================================================
-# 10. HISTORICAL DATA
+# 10. HISTORICAL DATA (summary — manage in Historiales page)
 # =============================================================================
 st.divider()
 st.header("Historial de auditorías")
+st.caption("Gestiona el historial (subir, eliminar) en la pestaña **Historiales**.")
 
 consol_hist = load_consol_history()
 
 if not consol_hist:
     st.info("No hay auditorías guardadas en el historial.")
 else:
-    # Trend table
     hist_rows = []
     for h in consol_hist:
         t = h.get("total", {})
@@ -1123,17 +1124,3 @@ else:
             "Pérdida (€)": f"{t.get('perdida_monetaria', 0):,.2f}",
         })
     st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
-
-    with st.expander("Gestionar historial"):
-        for i, h in enumerate(consol_hist):
-            c1, c2 = st.columns([5, 1])
-            c1.write(f"**{h.get('fecha', '')}** — {h.get('centro', 'Sin centro')} "
-                     f"({h.get('total', {}).get('ubicaciones', 0)} ubic.)")
-            if c2.button("Eliminar", key=f"del_consol_{i}", type="secondary"):
-                hist_current = load_consol_history()
-                hist_current = [x for x in hist_current if x.get("key") != h["key"]]
-                save_consol_history(hist_current)
-                st.rerun()
-        if st.button("Limpiar todo el historial", type="secondary"):
-            save_consol_history([])
-            st.rerun()
