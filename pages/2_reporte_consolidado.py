@@ -219,6 +219,13 @@ def process_sheet(df, is_control=False, df_values_ext=None):
                     df.loc[fill_mask3, "_valor_unit"] = mapped3[fill_mask3]
                 df.drop(columns=["_mat_k", "_lote_k"], errors="ignore", inplace=True)
 
+    # If _valor_total is missing/zero but _valor_unit exists, derive it (stock × unit price)
+    _vt_missing = (df["_valor_total"] == 0) | df["_valor_total"].isna()
+    _vu_present = (df["_valor_unit"] != 0) & df["_valor_unit"].notna()
+    df.loc[_vt_missing & _vu_present, "_valor_total"] = (
+        df.loc[_vt_missing & _vu_present, "_valor_unit"] * df.loc[_vt_missing & _vu_present, "_stock"]
+    )
+
     df["_is_error"] = False
     mask_filled = df["_fisica"].notna()
     if mask_filled.any():
